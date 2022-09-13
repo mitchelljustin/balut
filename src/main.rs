@@ -9,6 +9,7 @@ mod scanner;
 mod parser;
 mod ast;
 mod types;
+mod token;
 
 
 fn main() {

@@ -1,20 +1,24 @@
 use ErrorKind::MatchExhausted;
+
 use crate::ast::{Literal, Node};
-use crate::parser::ErrorKind::ConsumeFailed;
+use crate::parser::ErrorKind::{ConsumeFailed, IllegalSyntheticNewline};
+use crate::parser::ParserError::ParseError;
 use crate::scanner;
-use crate::scanner::{ScannerError, Token};
+use crate::scanner::ScannerError;
+use crate::token::{Location, ScannedToken, Token};
+use crate::token::Token::*;
 
 #[derive(Debug)]
 pub enum ParserError {
     ScannerError(ScannerError),
-    ParseError(ErrorKind),
+    ParseError { kind: ErrorKind, loc: Location },
 }
 
 #[derive(Debug)]
 pub enum ErrorKind {
-    ScanError(ScannerError),
     ConsumeFailed { expected: &'static str, actual: Token },
     MatchExhausted { rule_name: &'static str, token: Token },
+    IllegalSyntheticNewline,
     IllegalEOF,
 }
 
@@ -26,13 +30,14 @@ pub fn parse_source(source: String) -> Result<Node, ParserError> {
     parse(tokens)
 }
 
-pub fn parse(tokens: Vec<Token>) -> Result<Node, ParserError> {
-    Parser::new(tokens).parse().map_err(ParserError::ParseError)
+pub fn parse(tokens: Vec<ScannedToken>) -> Result<Node, ParserError> {
+    Parser::new(tokens).parse()
 }
 
 pub struct Parser {
-    tokens: Vec<Token>,
+    tokens: Vec<ScannedToken>,
     index: usize,
+    synthetic_newline: bool,
 }
 
 mod operators {
@@ -41,47 +46,54 @@ mod operators {
     const UNARY: &[&'static str] = &["-", "!", "~"];
 }
 
-macro consume_failed($self:expr, $expected:expr) {
-return Err($crate::parser::ErrorKind::ConsumeFailed { actual: $self.current().clone(), expected: $expected })
-}
 
 macro consume($self:expr, $pat:pat) {
-{
-    match $self.current() {
-        $pat => {
-            $self.increment();
-        },
-        _ => consume_failed!($self, stringify!($pat)),
-    }
+match $self.current() {
+    $pat => $self.increment(),
+    _ => return $self.consume_failed(stringify!(pattern: $pat)),
 }
 }
 
 impl Parser {
-    fn new(tokens: Vec<Token>) -> Parser {
+    fn new(tokens: Vec<ScannedToken>) -> Parser {
         Parser {
             tokens,
             index: 0,
+            synthetic_newline: false,
         }
     }
 
+    fn token_at(&self, offset: isize) -> &ScannedToken {
+        let index = (self.index as isize + offset) as usize;
+        &self.tokens[index]
+    }
+
+    fn peek(&self, offset: isize) -> &Token {
+        &self.token_at(offset).t
+    }
+
     fn current(&self) -> &Token {
-        &self.tokens[self.index]
+        self.peek(0)
     }
 
     fn previous(&self) -> &Token {
-        &self.tokens[self.index - 1]
+        self.peek(-1)
     }
 
     fn next(&self) -> &Token {
-        &self.tokens[self.index + 1]
+        self.peek(1)
     }
 
     fn increment(&mut self) {
         self.index += 1;
     }
 
-    fn parse(mut self) -> NodeResult {
+    fn parse(mut self) -> Result<Node, ParserError> {
         self.sequence(false)
+            .map_err(|kind| ParseError {
+                kind,
+                loc: self.token_at(0).loc.clone(),
+            })
     }
 
     fn match_exhausted(&self, rule_name: &'static str) -> NodeResult {
@@ -93,47 +105,56 @@ impl Parser {
     }
 
     fn advance(&mut self) -> Token {
-        let token = self.current().clone();
         self.increment();
-        token
+        let tok = self.previous().clone();
+        tok
     }
 
     fn sequence(&mut self, indent: bool) -> NodeResult {
         if indent {
-            consume!(self, Token::Newline);
-            consume!(self, Token::Indent);
+            consume!(self, Newline);
+            consume!(self, Indent);
         }
         let mut statements = Vec::new();
-        while (indent && !matches!(self.current(), Token::Dedent)) || (!indent && !matches!(self.current(), Token::EOF)) {
+        while (indent && !matches!(self.current(), Dedent))
+            || (!indent && !matches!(self.current(), EOF)) {
             let statement = self.statement()?;
             statements.push(statement);
         }
         if indent {
-            consume!(self, Token::Dedent);
+            consume!(self, Dedent);
         }
+        if self.synthetic_newline {
+            return Err(IllegalSyntheticNewline);
+        }
+        self.synthetic_newline = true;
         Ok(Node::Sequence {
             statements
         })
     }
 
     fn statement(&mut self) -> NodeResult {
-        let expr = self.expr()?;
-        consume!(self, Token::Newline);
+        let expr = self.expression()?;
+        if self.synthetic_newline {
+            self.synthetic_newline = false;
+        } else {
+            consume!(self, Newline);
+        }
         Ok(expr)
     }
 
-    fn expr(&mut self) -> NodeResult {
-        Ok(self.phrase()?)
+    fn expression(&mut self) -> NodeResult {
+        self.phrase()
     }
 
     fn phrase(&mut self) -> NodeResult {
         let head = self.ident()?;
         let mut terms = vec![head];
-        while !matches!(self.current(), Token::Newline) {
+        while !matches!(self.current(), Newline | Sym(")")) {
             let term = self.primary()?;
             terms.push(term)
         }
-        if matches!(self.current(), Token::Newline) && matches!(self.next(), Token::Indent) {
+        if matches!(self.current(), Newline) && matches!(self.next(), Indent) {
             let final_seq = self.sequence(true)?;
             terms.push(final_seq);
         }
@@ -142,40 +163,41 @@ impl Parser {
 
     fn primary(&mut self) -> NodeResult {
         match self.current() {
-            Token::Ident(_) => self.ident(),
-            Token::Integer(_) => self.integer(),
-            Token::String(_) => self.string(),
-            Token::Punct("(") => self.grouping(),
+            Ident(_) => self.ident(),
+            IntLit(_) => self.integer(),
+            StrLit(_) => self.string(),
+            Sym("(") => self.grouping(),
             _ => self.match_exhausted("primary"),
         }
     }
 
 
     fn integer(&mut self) -> NodeResult {
-        let Token::Integer(value) = self.advance() else {
+        let IntLit(value) = self.advance() else {
             return self.consume_failed("integer");
         };
         Ok(Node::Literal { value: Literal::Integer(value) })
     }
 
     fn string(&mut self) -> NodeResult {
-        let Token::String(value) = self.advance() else {
+        let StrLit(value) = self.advance() else {
             return self.consume_failed("string");
         };
         Ok(Node::Literal { value: Literal::String(value) })
     }
 
     fn ident(&mut self) -> NodeResult {
-        let Token::Ident(name) = self.advance() else {
+        let token = self.advance();
+        let Ident(name) = token else {
             return self.consume_failed("ident");
         };
         Ok(Node::Ident { name })
     }
 
     fn grouping(&mut self) -> NodeResult {
-        consume!(self, Token::Punct("("));
-        let body = Box::new(self.expr()?);
-        consume!(self, Token::Punct(")"));
+        consume!(self, Sym("("));
+        let body = Box::new(self.expression()?);
+        consume!(self, Sym(")"));
         Ok(Node::Grouping { body })
     }
 }
