@@ -1,7 +1,9 @@
+use std::fmt::{Display, Formatter};
+
 use ErrorKind::MatchExhausted;
 
 use crate::ast::{Literal, Node};
-use crate::parser::ErrorKind::{ConsumeFailed, IllegalSyntheticNewline};
+use crate::parser::ErrorKind::{ConsumeFailed, ExpectedIndent, IllegalSyntheticNewline, Unknown};
 use crate::parser::ParserError::ParseError;
 use crate::scanner;
 use crate::scanner::ScannerError;
@@ -10,23 +12,23 @@ use crate::token::Token::*;
 
 #[derive(Debug)]
 pub enum ParserError {
-    ScannerError(ScannerError),
-    ParseError { kind: ErrorKind, loc: Location },
+    ScanError(ScannerError),
+    ParseError { kind: ErrorKind, loc: Location, derivation: Derivation },
 }
 
 #[derive(Debug)]
 pub enum ErrorKind {
     ConsumeFailed { expected: &'static str, actual: Token },
-    MatchExhausted { rule_name: &'static str, token: Token },
+    MatchExhausted { rule: &'static str, token: Token },
+    ExpectedIndent,
     IllegalSyntheticNewline,
-    IllegalEOF,
+    Unknown,
 }
 
 type NodeResult = Result<Node, ErrorKind>;
-type TokenResult = Result<Token, ErrorKind>;
 
-pub fn parse_source(source: String) -> Result<Node, ParserError> {
-    let tokens = scanner::scan(source).map_err(ParserError::ScannerError)?;
+pub fn parse_source(source: &str) -> Result<Node, ParserError> {
+    let tokens = scanner::scan(source).map_err(ParserError::ScanError)?;
     parse(tokens)
 }
 
@@ -34,16 +36,58 @@ pub fn parse(tokens: Vec<ScannedToken>) -> Result<Node, ParserError> {
     Parser::new(tokens).parse()
 }
 
+
+#[derive(Default, Debug, Clone)]
+pub struct Derivation {
+    steps: Vec<String>,
+}
+
+impl Display for Derivation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        for (step, report) in self.steps.iter().enumerate() {
+            write!(f, "{step:>6} -- {report}\n")?;
+        }
+        Ok(())
+    }
+}
+
 pub struct Parser {
     tokens: Vec<ScannedToken>,
     index: usize,
-    synthetic_newline: bool,
+    synthetic_newlines: usize,
+    derivation: Derivation,
 }
 
-mod operators {
-    const ASSIGNMENT: &[&'static str] = &["=", "=>"];
-    const BINARY: &[&'static str] = &["+", "-", "/", "*"];
-    const UNARY: &[&'static str] = &["-", "!", "~"];
+
+mod patterns {
+    pub macro sym_union($($sym:literal)|+) {
+    $crate::token::Token::Sym($($sym)|+)
+    }
+
+    pub macro assignment() {
+    sym_union!["=" | "=>"]
+    }
+
+    pub macro binary() {
+    sym_union!["+" | "-" | "/" | "*"]
+    }
+
+    pub macro unary_low() {
+    sym_union!["-"]
+    }
+
+    pub macro unary_high() {
+    sym_union!["!" | "~"]
+    }
+
+    pub macro phrase_terminator() {
+    $crate::token::Token::Newline |
+    $crate::token::Token::EOF |
+    $crate::token::Token::Dedent |
+    sym_union![")"] |
+    binary!() |
+    assignment!()
+    }
 }
 
 
@@ -59,8 +103,24 @@ impl Parser {
         Parser {
             tokens,
             index: 0,
-            synthetic_newline: false,
+            synthetic_newlines: 0,
+            derivation: Default::default(),
         }
+    }
+
+
+    fn add_step(&mut self, rule: &str, step: String) {
+        self.derivation.steps.push(format!(
+            "{rule:>10}: {step}"
+        ));
+    }
+
+    fn entering(&mut self, rule: &str) {
+        self.add_step(rule, "entering".to_string());
+    }
+
+    fn returning(&mut self, rule: &str, node: &Node) {
+        self.add_step(rule, format!("returning '{node}'"))
     }
 
     fn token_at(&self, offset: isize) -> &ScannedToken {
@@ -69,7 +129,7 @@ impl Parser {
     }
 
     fn peek(&self, offset: isize) -> &Token {
-        &self.token_at(offset).t
+        &self.token_at(offset).tok
     }
 
     fn current(&self) -> &Token {
@@ -85,19 +145,29 @@ impl Parser {
     }
 
     fn increment(&mut self) {
+        let ScannedToken { tok, loc } = &self.tokens[self.index];
+        self.derivation.steps.push(format!("            eating {tok:?} at {loc}"));
         self.index += 1;
     }
 
     fn parse(mut self) -> Result<Node, ParserError> {
-        self.sequence(false)
-            .map_err(|kind| ParseError {
-                kind,
-                loc: self.token_at(0).loc.clone(),
-            })
+        match self.sequence(false) {
+            Ok(root) => {
+                let derivation = self.derivation;
+                println!("Derivation OK: \n{derivation}");
+                Ok(root)
+            }
+            Err(kind) =>
+                Err(ParseError {
+                    kind,
+                    loc: self.token_at(0).loc.clone(),
+                    derivation: self.derivation,
+                })
+        }
     }
 
-    fn match_exhausted(&self, rule_name: &'static str) -> NodeResult {
-        Err(MatchExhausted { rule_name, token: self.current().clone() })
+    fn match_exhausted(&self, rule: &'static str) -> NodeResult {
+        Err(MatchExhausted { rule, token: self.current().clone() })
     }
 
     fn consume_failed(&self, expected: &'static str) -> NodeResult {
@@ -106,98 +176,246 @@ impl Parser {
 
     fn advance(&mut self) -> Token {
         self.increment();
-        let tok = self.previous().clone();
-        tok
+        self.previous().clone()
     }
 
     fn sequence(&mut self, indent: bool) -> NodeResult {
+        self.entering("sequence");
+        let mut indent_level = 0;
         if indent {
+            self.add_step("sequence", format!("consuming newline+indent"));
             consume!(self, Newline);
-            consume!(self, Indent);
+            while let Indent = self.current() {
+                indent_level += 1;
+                self.add_step("sequence", format!("consuming indent {indent_level}"));
+                self.increment();
+            }
+            if indent_level == 0 {
+                return self.consume_failed("indent");
+            }
+        } else {
+            while matches!(self.current(), Newline | Indent | Dedent) {
+                self.add_step("sequence", format!("consuming space after statement"));
+                self.increment();
+            }
         }
         let mut statements = Vec::new();
         while (indent && !matches!(self.current(), Dedent))
             || (!indent && !matches!(self.current(), EOF)) {
             let statement = self.statement()?;
+            self.add_step("sequence", format!("appending '{statement}'"));
             statements.push(statement);
+            if !indent {
+                while matches!(self.current(), Newline | Indent | Dedent) {
+                    self.add_step("sequence", format!("consuming space after statement"));
+                    self.increment();
+                }
+            }
         }
-        if indent {
+        for i in 1..=indent_level {
+            self.add_step("sequence", format!("consuming dedent {i}"));
             consume!(self, Dedent);
         }
-        if self.synthetic_newline {
-            return Err(IllegalSyntheticNewline);
-        }
-        self.synthetic_newline = true;
-        Ok(Node::Sequence {
-            statements
-        })
+        self.synthetic_newlines += 1;
+        let node = Node::Sequence { statements };
+        self.returning("sequence", &node);
+        Ok(node)
     }
 
     fn statement(&mut self) -> NodeResult {
-        let expr = self.expression()?;
-        if self.synthetic_newline {
-            self.synthetic_newline = false;
+        self.entering("statement");
+        let node = self.assignment()?;
+        if self.synthetic_newlines > 0 {
+            self.add_step("statement", format!("consuming synthetic newline {}", self.synthetic_newlines));
+            self.synthetic_newlines -= 1;
         } else {
             consume!(self, Newline);
         }
-        Ok(expr)
+        self.returning("statement", &node);
+        Ok(node)
+    }
+
+    fn assignment(&mut self) -> NodeResult {
+        self.entering("assignment");
+        let mut node = self.expression()?;
+        while matches!(self.current(), patterns::assignment!()) {
+            let Sym(operator) = self.advance() else { break; };
+            self.add_step("assignment", format!("adding operator '{operator}'"));
+            let value = Box::new(self.expression()?);
+            node = Node::Assignment {
+                target: Box::new(node),
+                operator,
+                value,
+            };
+            self.add_step("assignment", format!("collecting '{node}'"));
+        }
+        Ok(node)
     }
 
     fn expression(&mut self) -> NodeResult {
-        self.phrase()
+        self.unary_low()
+    }
+
+    fn unary_low(&mut self) -> NodeResult {
+        self.entering("unary_low");
+        if matches!(self.current(), patterns::unary_low!()) {
+            let Sym(operator) = self.advance() else { return Err(Unknown); };
+            let body = Box::new(self.unary_low()?);
+            let node = Node::Unary { operator, body };
+            self.returning("unary_low", &node);
+            return Ok(node);
+        }
+        let node = self.binary()?;
+        self.returning("unary_low", &node);
+        Ok(node)
+    }
+
+    fn binary(&mut self) -> NodeResult {
+        self.entering("binary");
+        let mut node = self.phrase()?;
+
+        while matches!(self.current(), patterns::binary!()) {
+            let Sym(operator) = self.advance() else { break; }; // should never happen
+            self.add_step("binary", format!("adding operator '{operator}'"));
+            let rhs = Box::new(self.phrase()?);
+            node = Node::Binary {
+                lhs: Box::new(node),
+                operator,
+                rhs,
+            };
+            self.add_step("binary", format!("collecting '{node}'"));
+        }
+
+        self.returning("binary", &node);
+        Ok(node)
     }
 
     fn phrase(&mut self) -> NodeResult {
-        let head = self.ident()?;
+        self.entering("phrase");
+        let head = self.unary_high()?;
         let mut terms = vec![head];
-        while !matches!(self.current(), Newline | Sym(")")) {
-            let term = self.primary()?;
-            terms.push(term)
+        while !matches!(self.current(), patterns::phrase_terminator!()) {
+            let term = self.unary_high()?;
+            self.add_step("phrase", format!("adding term '{term}'"));
+            terms.push(term);
         }
         if matches!(self.current(), Newline) && matches!(self.next(), Indent) {
             let final_seq = self.sequence(true)?;
+            self.add_step("phrase", format!("adding final sequence '{final_seq}'"));
             terms.push(final_seq);
         }
-        Ok(Node::Phrase { terms })
+        let node = match <[Node; 1]>::try_from(terms) {
+            Ok([head]) => head,
+            Err(terms) => Node::Phrase { terms },
+        };
+        self.returning("phrase", &node);
+        Ok(node)
+    }
+
+
+    fn unary_high(&mut self) -> NodeResult {
+        self.entering("unary_high");
+        if matches!(self.current(), patterns::unary_high!()) {
+            let Sym(operator) = self.advance() else { return Err(Unknown); };
+            let body = Box::new(self.unary_high()?);
+            let node = Node::Unary { operator, body };
+            self.returning("unary_high", &node);
+            return Ok(node);
+        }
+        let node = self.primary()?;
+        self.returning("unary_high", &node);
+        Ok(node)
     }
 
     fn primary(&mut self) -> NodeResult {
+        self.entering("primary");
         match self.current() {
             Ident(_) => self.ident(),
             IntLit(_) => self.integer(),
             StrLit(_) => self.string(),
             Sym("(") => self.grouping(),
+            Nomen(_) => self.path(),
+            Newline => {
+                if !matches!(self.next(), Indent) {
+                    return Err(ExpectedIndent);
+                }
+                self.sequence(true)
+            }
             _ => self.match_exhausted("primary"),
         }
     }
 
 
     fn integer(&mut self) -> NodeResult {
+        self.entering("integer");
         let IntLit(value) = self.advance() else {
             return self.consume_failed("integer");
         };
-        Ok(Node::Literal { value: Literal::Integer(value) })
+        let node = Node::Literal { value: Literal::Integer(value) };
+        self.returning("integer", &node);
+        Ok(node)
     }
 
     fn string(&mut self) -> NodeResult {
+        self.entering("string");
         let StrLit(value) = self.advance() else {
             return self.consume_failed("string");
         };
-        Ok(Node::Literal { value: Literal::String(value) })
+        let node = Node::Literal { value: Literal::String(value) };
+        self.returning("string", &node);
+        Ok(node)
     }
 
     fn ident(&mut self) -> NodeResult {
-        let token = self.advance();
-        let Ident(name) = token else {
+        self.entering("ident");
+        let Ident(name) = self.advance() else {
             return self.consume_failed("ident");
         };
-        Ok(Node::Ident { name })
+        let node = Node::Ident { name };
+        self.returning("ident", &node);
+        Ok(node)
     }
 
     fn grouping(&mut self) -> NodeResult {
+        self.entering("grouping");
         consume!(self, Sym("("));
+        if matches!(self.current(), Sym(")")) {
+            self.increment();
+            let node = Node::Nil;
+            self.returning("grouping", &node);
+            return Ok(node);
+        }
         let body = Box::new(self.expression()?);
         consume!(self, Sym(")"));
-        Ok(Node::Grouping { body })
+        let node = Node::Grouping { body };
+        self.returning("grouping", &node);
+        Ok(node)
+    }
+
+    fn nomen(&mut self) -> NodeResult {
+        self.entering("nomen");
+        let Nomen(name) = self.advance() else {
+            return self.consume_failed("nomen");
+        };
+        let node = Node::Nomen { name };
+        self.returning("nomen", &node);
+        Ok(node)
+    }
+
+    fn path(&mut self) -> NodeResult {
+        self.entering("path");
+        let head = self.nomen()?;
+        let mut components = vec![head];
+        while matches!(self.current(), Sym("::")) {
+            self.increment();
+            let component = self.nomen()?;
+            components.push(component);
+        }
+        let node = match <[Node; 1]>::try_from(components) {
+            Ok([nomen]) => nomen,
+            Err(components) => Node::Path { components },
+        };
+        self.returning("path", &node);
+        Ok(node)
     }
 }

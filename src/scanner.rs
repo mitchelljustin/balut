@@ -8,7 +8,7 @@ use crate::token::Token::*;
 #[derive(Debug)]
 pub struct ScannerError {
     kind: ErrorKind,
-    location: usize,
+    loc: Location,
 }
 
 #[derive(Debug)]
@@ -20,16 +20,27 @@ pub enum ErrorKind {
 const SPACES_PER_INDENT: i32 = 2;
 
 const ALLOWED_PUNCT: &[&'static str] = &[
+    "::",
+    "=>",
     ":",
     ".",
-    "::",
     "=",
-    "=>",
     "+",
+    "-",
+    "*",
+    "/",
     "(",
     ")",
     "~",
+    "!",
 ];
+
+fn find_punct(punct: &str) -> Option<&'static str> {
+    ALLOWED_PUNCT
+        .iter()
+        .find(|&&s| s == punct)
+        .map(|s| *s)
+}
 
 pub struct Scanner {
     source: Vec<char>,
@@ -46,15 +57,20 @@ while !$self.is_at_end() && matches!($self.current(), $pat) {
     }
 }
 
-pub fn scan(source: String) -> Result<Vec<ScannedToken>, ScannerError> {
-    Scanner::new(source).scan()
+pub fn scan(source: &str) -> Result<Vec<ScannedToken>, ScannerError> {
+    Scanner::new(&source).scan()
 }
 
 impl Scanner {
-    fn new(mut source: String) -> Scanner {
-        source.push('\n');
+    fn new(source: &str) -> Scanner {
+        let mut source: Vec<char> = source.chars().collect();
+        if let Some(&ch) = source.last() {
+            if ch != '\n' {
+                source.push('\n');
+            }
+        }
         Scanner {
-            source: source.chars().collect(),
+            source,
             tokens: Vec::new(),
             index: 0,
             start: 0,
@@ -84,6 +100,11 @@ impl Scanner {
             ' ' => {}
             '\n' =>
                 self.newline()?,
+            '#' => {
+                while !self.is_at_end() && !matches!(self.current(), '\n') {
+                    self.increment();
+                }
+            }
             first =>
                 self.sym(first)?
         }
@@ -93,7 +114,7 @@ impl Scanner {
     fn sym(&mut self, first: char) -> Result<(), ErrorKind> {
         let one_char = first.to_string();
         if self.is_at_end() {
-            let Some(punct) = ALLOWED_PUNCT.iter().find(|&&s| s == one_char) else {
+            let Some(punct) = find_punct(&one_char) else {
                 return Err(IllegalChar(first));
             };
             self.add(Sym(punct));
@@ -102,12 +123,12 @@ impl Scanner {
         let second = self.current();
         let mut two_char = one_char.clone();
         two_char.push(second);
-        if let Some(punct) = ALLOWED_PUNCT.iter().find(|&&s| s == two_char) {
+        if let Some(punct) = find_punct(&two_char) {
             self.add(Sym(punct));
             self.increment();
             return Ok(());
         }
-        if let Some(punct) = ALLOWED_PUNCT.iter().find(|&&s| s == one_char) {
+        if let Some(punct) = find_punct(&one_char) {
             self.add(Sym(punct));
             return Ok(());
         }
@@ -115,14 +136,10 @@ impl Scanner {
     }
 
     fn newline(&mut self) -> Result<(), ErrorKind> {
-        consume_all!(self, '\n');
-        for _ in 0..(self.index - self.start) {
-            self.add(Newline);
-        }
-        let spaces_start = self.index;
+        self.add(Newline);
         consume_all!(self, ' ');
-        let n_spaces = (self.index - spaces_start) as i32;
-        let level = n_spaces / SPACES_PER_INDENT;
+        let num_spaces = (self.index - self.start - 1) as i32;
+        let level = num_spaces / SPACES_PER_INDENT;
         let diff = level - self.indent_level;
         for _ in 0..diff {
             self.add(Indent);
@@ -131,6 +148,8 @@ impl Scanner {
             self.add(Dedent);
         }
         self.indent_level = level;
+        self.loc.col = 0;
+        self.loc.line += 1;
         Ok(())
     }
 
@@ -142,7 +161,7 @@ impl Scanner {
         while !self.is_at_end() {
             self.start = self.index;
             self.scan_token()
-                .map_err(|kind| ScannerError { kind, location: self.index })?;
+                .map_err(|kind| ScannerError { kind, loc: self.loc.clone() })?;
         }
         self.add(EOF);
         return Ok(self.tokens);
@@ -171,7 +190,7 @@ impl Scanner {
     fn advance(&mut self) -> char {
         let c = self.current();
         self.increment();
-        return c;
+        c
     }
 
     fn increment(&mut self) {
@@ -179,13 +198,9 @@ impl Scanner {
         self.loc.col += 1;
     }
 
-    fn add(&mut self, t: Token) {
-        if matches!(t, Token::Newline) {
-            self.loc.line += 1;
-            self.loc.col = 0;
-        }
+    fn add(&mut self, tok: Token) {
         let loc = self.loc.clone();
-        self.tokens.push(ScannedToken { t, loc });
+        self.tokens.push(ScannedToken { tok, loc });
     }
 
     fn ident_like(&mut self, make_token: impl FnOnce(String) -> Token) {

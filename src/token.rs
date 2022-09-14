@@ -14,15 +14,24 @@ pub enum Token {
     EOF,
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct Location {
     pub line: usize,
     pub col: usize,
 }
 
+impl Default for Location {
+    fn default() -> Self {
+        Location {
+            line: 1,
+            col: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ScannedToken {
-    pub t: Token,
+    pub tok: Token,
     pub loc: Location,
 }
 

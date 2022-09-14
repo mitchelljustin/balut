@@ -24,20 +24,28 @@ pub enum Node {
     Grouping { body: Box<Node> },
     Binary { lhs: Box<Node>, operator: &'static str, rhs: Box<Node> },
     Assignment { target: Box<Node>, operator: &'static str, value: Box<Node> },
-    Unary { operator: &'static str, rhs: Box<Node> },
+    Unary { operator: &'static str, body: Box<Node> },
     Sequence { statements: Vec<Node> },
+    Path { components: Vec<Node> },
+    Nomen { name: String },
     Ident { name: String },
+    Nil,
 }
 
-fn fmt_nodes(f: &mut Formatter<'_>, nodes: &Vec<Node>, separator: &str, groupers: (char, char)) -> std::fmt::Result {
-    f.write_char(groupers.0)?;
+fn fmt_nodes(f: &mut Formatter<'_>, nodes: &[Node], separator: &str, groupers: Option<(char, char)>) -> std::fmt::Result {
+    if let Some((left, _)) = groupers {
+        f.write_char(left)?;
+    }
     for (i, node) in nodes.iter().enumerate() {
         node.fmt(f)?;
         if i < nodes.len() - 1 {
             f.write_str(separator)?;
         }
     }
-    f.write_char(groupers.1)?;
+    if let Some((_, right)) = groupers {
+        f.write_char(right)?;
+    }
+
     Ok(())
 }
 
@@ -47,19 +55,23 @@ impl Display for Node {
             Node::Literal { value } =>
                 write!(f, "{value}"),
             Node::Phrase { terms } =>
-                fmt_nodes(f, terms, " ", ('‹', '›')),
-            Node::Ident { name } =>
+                fmt_nodes(f, terms, " ", Some(('‹', '›'))),
+            Node::Ident { name } | Node::Nomen { name } =>
                 write!(f, "{name}"),
             Node::Sequence { statements } =>
-                fmt_nodes(f, statements, "; ", ('[', ']')),
+                fmt_nodes(f, statements, "; ", Some(('[', ']'))),
+            Node::Path { components } =>
+                fmt_nodes(f, components, "::", None),
             Node::Grouping { body } =>
                 write!(f, "({body})"),
-            Node::Binary { .. } =>
-                Ok(()),
-            Node::Assignment { .. } =>
-                Ok(()),
-            Node::Unary { .. } =>
-                Ok(()),
+            Node::Binary { lhs, operator, rhs } =>
+                write!(f, "‹{lhs} {operator} {rhs}›"),
+            Node::Assignment { target, operator, value } =>
+                write!(f, "{target} {operator} {value}"),
+            Node::Unary { body, operator } =>
+                write!(f, "{operator}{body}"),
+            Node::Nil =>
+                write!(f, "()"),
         }
     }
 }
