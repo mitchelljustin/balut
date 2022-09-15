@@ -14,6 +14,30 @@ pub enum Token {
     EOF,
 }
 
+const ALLOWED_SYMS: &[&'static str] = &[
+    "::",
+    "=>",
+    ":",
+    ".",
+    "=",
+    "+",
+    "-",
+    "*",
+    "/",
+    "(",
+    ")",
+    "~",
+    "!",
+    "&",
+];
+
+pub fn sym_allowed(sym: &str) -> Option<&'static str> {
+    ALLOWED_SYMS
+        .iter()
+        .find(|&&s| s == sym)
+        .map(|s| *s)
+}
+
 #[derive(Debug, Clone)]
 pub struct Location {
     pub line: usize,

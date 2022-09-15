@@ -2,7 +2,7 @@ use std::num::ParseIntError;
 use std::str::FromStr;
 
 use crate::scanner::ErrorKind::{IllegalChar, IntParseFailed};
-use crate::token::{Location, ScannedToken, Token};
+use crate::token::{sym_allowed, Location, ScannedToken, Token};
 use crate::token::Token::*;
 
 #[derive(Debug)]
@@ -18,29 +18,6 @@ pub enum ErrorKind {
 }
 
 const SPACES_PER_INDENT: i32 = 2;
-
-const ALLOWED_PUNCT: &[&'static str] = &[
-    "::",
-    "=>",
-    ":",
-    ".",
-    "=",
-    "+",
-    "-",
-    "*",
-    "/",
-    "(",
-    ")",
-    "~",
-    "!",
-];
-
-fn find_punct(punct: &str) -> Option<&'static str> {
-    ALLOWED_PUNCT
-        .iter()
-        .find(|&&s| s == punct)
-        .map(|s| *s)
-}
 
 pub struct Scanner {
     source: Vec<char>,
@@ -71,7 +48,7 @@ impl Scanner {
         }
         Scanner {
             source,
-            tokens: Vec::new(),
+            tokens: Default::default(),
             index: 0,
             start: 0,
             loc: Default::default(),
@@ -100,36 +77,39 @@ impl Scanner {
             ' ' => {}
             '\n' =>
                 self.newline()?,
-            '#' => {
-                while !self.is_at_end() && !matches!(self.current(), '\n') {
-                    self.increment();
-                }
-            }
+            '#' =>
+                self.comment(),
             first =>
                 self.sym(first)?
         }
         Ok(())
     }
 
+    fn comment(&mut self) {
+        while !self.is_at_end() && !matches!(self.current(), '\n') {
+            self.increment();
+        }
+    }
+
     fn sym(&mut self, first: char) -> Result<(), ErrorKind> {
         let one_char = first.to_string();
         if self.is_at_end() {
-            let Some(punct) = find_punct(&one_char) else {
+            let Some(sym) = sym_allowed(&one_char) else {
                 return Err(IllegalChar(first));
             };
-            self.add(Sym(punct));
+            self.add(Sym(sym));
             return Ok(());
         }
         let second = self.current();
         let mut two_char = one_char.clone();
         two_char.push(second);
-        if let Some(punct) = find_punct(&two_char) {
-            self.add(Sym(punct));
+        if let Some(sym) = sym_allowed(&two_char) {
+            self.add(Sym(sym));
             self.increment();
             return Ok(());
         }
-        if let Some(punct) = find_punct(&one_char) {
-            self.add(Sym(punct));
+        if let Some(sym) = sym_allowed(&one_char) {
+            self.add(Sym(sym));
             return Ok(());
         }
         return Err(IllegalChar(first));
@@ -206,6 +186,7 @@ impl Scanner {
     fn ident_like(&mut self, make_token: impl FnOnce(String) -> Token) {
         self.consume_all_alphanum();
         let name = self.lexeme();
+        
         self.add(make_token(name))
     }
 

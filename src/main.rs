@@ -12,6 +12,7 @@ mod parser;
 mod ast;
 mod types;
 mod token;
+mod interpreter;
 
 
 fn main() {

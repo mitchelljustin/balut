@@ -3,7 +3,7 @@ use std::fmt::{Display, Formatter};
 use ErrorKind::MatchExhausted;
 
 use crate::ast::{Literal, Node};
-use crate::parser::ErrorKind::{ConsumeFailed, ExpectedIndent, IllegalSyntheticNewline, Unknown};
+use crate::parser::ErrorKind::{ConsumeFailed, ExpectedIndent, IllegalFinalSequence, IllegalSyntheticNewline, Unknown};
 use crate::parser::ParserError::ParseError;
 use crate::scanner;
 use crate::scanner::ScannerError;
@@ -21,6 +21,7 @@ pub enum ErrorKind {
     ConsumeFailed { expected: &'static str, actual: Token },
     MatchExhausted { rule: &'static str, token: Token },
     ExpectedIndent,
+    IllegalFinalSequence,
     IllegalSyntheticNewline,
     Unknown,
 }
@@ -77,7 +78,13 @@ mod patterns {
     }
 
     pub macro unary_high() {
-    sym_union!["!" | "~"]
+    sym_union!["!" | "~" | "&"]
+    }
+
+    pub macro whitespace() {
+    $crate::token::Token::Newline |
+    $crate::token::Token::Dedent |
+    $crate::token::Token::Indent
     }
 
     pub macro phrase_terminator() {
@@ -151,7 +158,7 @@ impl Parser {
     }
 
     fn parse(mut self) -> Result<Node, ParserError> {
-        match self.sequence(false) {
+        match self.sequence(true) {
             Ok(root) => {
                 let derivation = self.derivation;
                 println!("Derivation OK: \n{derivation}");
@@ -179,10 +186,15 @@ impl Parser {
         self.previous().clone()
     }
 
-    fn sequence(&mut self, indent: bool) -> NodeResult {
+    fn sequence(&mut self, top_level: bool) -> NodeResult {
         self.entering("sequence");
         let mut indent_level = 0;
-        if indent {
+        if top_level {
+            while matches!(self.current(), patterns::whitespace!()) {
+                self.add_step("sequence", format!("consuming space after statement"));
+                self.increment();
+            }
+        } else {
             self.add_step("sequence", format!("consuming newline+indent"));
             consume!(self, Newline);
             while let Indent = self.current() {
@@ -193,20 +205,15 @@ impl Parser {
             if indent_level == 0 {
                 return self.consume_failed("indent");
             }
-        } else {
-            while matches!(self.current(), Newline | Indent | Dedent) {
-                self.add_step("sequence", format!("consuming space after statement"));
-                self.increment();
-            }
         }
         let mut statements = Vec::new();
-        while (indent && !matches!(self.current(), Dedent))
-            || (!indent && !matches!(self.current(), EOF)) {
+        while (!top_level && !matches!(self.current(), Dedent))
+            || (top_level && !matches!(self.current(), EOF)) {
             let statement = self.statement()?;
             self.add_step("sequence", format!("appending '{statement}'"));
             statements.push(statement);
-            if !indent {
-                while matches!(self.current(), Newline | Indent | Dedent) {
+            if top_level {
+                while matches!(self.current(), patterns::whitespace!()) {
                     self.add_step("sequence", format!("consuming space after statement"));
                     self.increment();
                 }
@@ -300,9 +307,15 @@ impl Parser {
             terms.push(term);
         }
         if matches!(self.current(), Newline) && matches!(self.next(), Indent) {
-            let final_seq = self.sequence(true)?;
-            self.add_step("phrase", format!("adding final sequence '{final_seq}'"));
-            terms.push(final_seq);
+            let Node::Sequence { mut statements } = self.sequence(false)? else {
+                return Err(Unknown);
+            };
+            let stmts_string = statements.iter()
+                .map(|t| format!("{t}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            self.add_step("phrase", format!("adding terms from sequence '{stmts_string}'"));
+            terms.append(&mut statements);
         }
         let node = match <[Node; 1]>::try_from(terms) {
             Ok([head]) => head,
@@ -339,7 +352,7 @@ impl Parser {
                 if !matches!(self.next(), Indent) {
                     return Err(ExpectedIndent);
                 }
-                self.sequence(true)
+                self.sequence(false)
             }
             _ => self.match_exhausted("primary"),
         }
