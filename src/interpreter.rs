@@ -1,94 +1,141 @@
 use std::collections::HashMap;
+use std::error::Error;
+use std::fmt::{Debug, Display, Formatter};
 
-use crate::ast::Node;
-use crate::interpreter::ErrorKind::{ArityError, ClassNotFound, ObjectNotFound, PropertyNotFound, TypeError, Unknown};
-use crate::parser::parse_source;
-use crate::types::Integer;
+use crate::ast::{Literal, Node};
+use crate::interpreter::ErrorKind::{ArityError, FacetNotFound, MethodNotFound, ObjectNotFound, PropertyNotFound, TypeError, Unimplemented, Unknown, VariableNotFound};
+use crate::types::Int;
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum Receiver {
-    Class,
+    Module,
     Instance,
 }
 
-type MethodFn = dyn Fn(&mut Interpreter, ObjectId, &[ObjectId]) -> ObjectResult;
-
-fn swag(_: &mut Interpreter, _: ObjectId, _: &[ObjectId]) -> ObjectResult {
-    Ok(1)
-}
+type MethodFn = fn(&mut Interpreter, ObjectId, &[ObjectId]) -> ObjectResult;
 
 pub enum MethodBody {
-    Native(Box<MethodFn>),
-    Node(Node),
+    Internal(MethodFn),
+    User(Node),
 }
 
-macro native_method($func:expr) {
-$crate::interpreter::MethodBody::Native(Box::new($func))
+impl Debug for MethodBody {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MethodBody::Internal(_) => write!(f, "Internal"),
+            MethodBody::User(node) => write!(f, "User({node})")
+        }
+    }
 }
 
+#[derive(Debug)]
 pub struct Method {
-    receiver: Receiver,
     name: String,
     params: Vec<Node>,
+    receiver: Receiver,
     body: MethodBody,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default)]
+pub struct Facet {
+    methods: HashMap<ObjectId, ObjectId>,
+}
+
+#[derive(Debug)]
+pub struct Nil {}
+
+#[derive(Debug)]
 pub enum Value {
-    Nil,
+    Nil(Nil),
+    Method(Method),
+    Facet(Facet),
     String(String),
-    Integer(Integer),
+    Int(Int),
+    Array(Vec<ObjectId>),
 }
 
 impl Value {
-    pub fn class_name(&self) -> &'static str {
+    pub fn facet_name(&self) -> &'static str {
         match self {
-            Value::Nil => "Nil",
+            Value::Nil(_) => "Nil",
             Value::String(_) => "String",
-            Value::Integer(_) => "Integer",
+            Value::Int(_) => "Int",
+            Value::Method(_) => "Method",
+            Value::Facet(_) => "Facet",
+            Value::Array(_) => "Array",
         }
+    }
+
+    pub fn nil() -> Self {
+        Value::Nil(Nil {})
+    }
+}
+
+impl Default for Value {
+    fn default() -> Self {
+        Self::nil()
     }
 }
 
 pub struct Object {
     id: ObjectId,
-    class: ObjectId,
-    methods: HashMap<ObjectId, Method>,
+    facets: Vec<ObjectId>,
     properties: HashMap<ObjectId, ObjectId>,
-    rust_val: Value,
+    value: Value,
 }
 
+macro define_expects($($method:ident, $method_mut:ident -> $discriminant:ident($ty:ty) )+) {
+$(
+        fn $method(&self) -> Result<&$ty, ErrorKind> {
+            match self.value {
+                Value::$discriminant(ref value) => Ok(value),
+                _ => Err(TypeError {
+                    expected: stringify!($discriminant).to_string(),
+                    actual: self.value.facet_name().to_string(),
+                })
+            }
+        }
+        fn $method_mut(&mut self) -> Result<&mut $ty, ErrorKind> {
+            match self.value {
+                Value::$discriminant(ref mut value) => Ok(value),
+                _ => Err(TypeError {
+                    expected: stringify!($discriminant).to_string(),
+                    actual: self.value.facet_name().to_string(),
+                })
+            }
+        }
+    )+
+}
 
 impl Object {
-    fn new(id: ObjectId, class: ObjectId) -> Self {
+    fn new(id: ObjectId) -> Self {
         Self {
             id,
-            class,
-            methods: Default::default(),
+            facets: Default::default(),
             properties: Default::default(),
-            rust_val: Value::Nil,
+            value: Default::default(),
         }
     }
 
-    fn add_method(&mut self, name: ObjectId, method: Method) {
-        self.methods.insert(name, method);
+    fn add_facet(&mut self, facet_id: ObjectId) {
+        self.facets.push(facet_id);
     }
 
-    fn set_property(&mut self, key: ObjectId, value: ObjectId) {
-        self.properties.insert(key, value);
+    fn set_property(&mut self, key_id: ObjectId, value_id: ObjectId) {
+        self.properties.insert(key_id, value_id);
     }
 
-    fn get_property(&self, key: ObjectId) -> Option<ObjectId> {
-        self.properties.get(&key).copied()
+    fn get_property(&self, key_id: ObjectId) -> Option<ObjectId> {
+        self.properties.get(&key_id).copied()
     }
 
-    pub fn expect_string(&self) -> Result<&String, ErrorKind> {
-        let Value::String(ref string) = self.rust_val else {
-            return Err(TypeError {
-                expected: "String".to_string(),
-                actual: self.rust_val.class_name().to_string(),
-            });
-        };
-        Ok(string)
+    define_expects! {
+        expect_nil, expect_nil_mut_DO_NOT_USE -> Nil(Nil)
+        expect_int, expect_int_mut -> Int(Int)
+        expect_string, expect_string_mut -> String(String)
+        expect_array, expect_array_mut -> Array(Vec<ObjectId>)
+        expect_facet, expect_facet_mut -> Facet(Facet)
+        expect_method, expect_method_mut -> Method(Method)
     }
 }
 
@@ -97,25 +144,58 @@ type ObjectId = i64;
 #[derive(Debug)]
 pub enum ErrorKind {
     ObjectNotFound(ObjectId),
-    ClassNotFound(String),
+    FacetNotFound(String),
     PropertyNotFound(String),
+    VariableNotFound(String),
+    MethodNotFound { name: String, target_id: ObjectId },
     TypeError { expected: String, actual: String },
     ArityError { method_name: String, expected: usize, actual: usize },
+    Unimplemented(Node),
     Unknown,
 }
 
+#[derive(Debug)]
+pub enum ScopeKind {
+    Global,
+    Method,
+    Facet,
+}
+
+#[derive(Debug)]
+pub struct Scope {
+    name: String,
+    binding: HashMap<ObjectId, ObjectId>,
+}
+
+impl Scope {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            binding: Default::default(),
+        }
+    }
+}
+
+
+impl Display for ErrorKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl Error for ErrorKind {}
+
 pub struct Interpreter {
     objects: Vec<Object>,
-    class_by_name: HashMap<String, ObjectId>,
+    facet_by_name: HashMap<String, ObjectId>,
     strings: HashMap<String, ObjectId>,
-    globals: HashMap<String, ObjectId>,
+    scope_stack: Vec<Scope>,
     nil: ObjectId,
 }
 
 type ObjectResult = Result<ObjectId, ErrorKind>;
 type EmptyResult = Result<(), ErrorKind>;
 
-const CLASS_CLASS: ObjectId = 0;
 
 fn ident_list(idents: &[&str]) -> Vec<Node> {
     idents
@@ -124,146 +204,280 @@ fn ident_list(idents: &[&str]) -> Vec<Node> {
         .collect()
 }
 
+fn object_property_get(ctx: &mut Interpreter, this_id: ObjectId, args: &[ObjectId]) -> ObjectResult {
+    let &[name_id] = args else { return Err(Unknown); };
+    let this = ctx.get_object(this_id)?;
+    let name_string = ctx.get_object(name_id)?.expect_string()?;
+    let value = this.get_property(name_id).ok_or_else(|| PropertyNotFound(name_string.clone()))?;
+    Ok(value)
+}
+
+fn object_property_set(ctx: &mut Interpreter, this_id: ObjectId, args: &[ObjectId]) -> ObjectResult {
+    let &[name_id, value_id] = args else { return Err(Unknown); };
+    ctx.get_object(name_id)?.expect_string()?;
+    ctx.get_object(value_id)?;
+    ctx.get_object_mut(this_id)?.set_property(name_id, value_id);
+    Ok(value_id)
+}
+
+fn object_facets(ctx: &mut Interpreter, this_id: ObjectId, args: &[ObjectId]) -> ObjectResult {
+    let &[] = args else { return Err(Unknown); };
+    let this = ctx.get_object(this_id)?;
+    let facets = this.facets.clone();
+    ctx.create_object_with_value(Value::Array(facets))
+}
+
+
 impl Interpreter {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             objects: Default::default(),
-            class_by_name: Default::default(),
+            facet_by_name: Default::default(),
             strings: Default::default(),
-            globals: Default::default(),
+            scope_stack: vec![Scope::new("global".to_string())],
             nil: -1,
         }
     }
 
-    fn create_object(&mut self, class: ObjectId) -> ObjectId {
+    fn scope_mut(&mut self) -> &mut Scope {
+        self.scope_stack.first_mut().unwrap()
+    }
+
+    fn global_mut(&mut self) -> &mut Scope {
+        self.scope_stack.last_mut().unwrap()
+    }
+
+    fn push_scope(&mut self, name: String) {
+        self.scope_stack.insert(0, Scope::new(name));
+    }
+
+    fn pop_scope(&mut self) {
+        self.scope_stack.remove(0);
+    }
+
+    fn create_object(&mut self) -> ObjectId {
         let id = self.objects.len() as ObjectId;
-        let object = Object::new(id, class);
+        let object = Object::new(id);
         self.objects.push(object);
         id
     }
 
-    fn init(&mut self) -> Result<(), ErrorKind> {
-        self.init_class_class()?;
-        self.init_object_class()?;
-        self.init_string_class()?;
-        self.init_integer_class()?;
+    fn create_object_of_facet(&mut self, facet_name: &str) -> ObjectResult {
+        let id = self.create_object();
+        self.add_facet_with_name(id, facet_name)?;
+        Ok(id)
+    }
+
+    fn set_variable(&mut self, var_name_id: ObjectId, value_id: ObjectId) -> ObjectResult {
+        self.get_object(var_name_id)?.expect_string()?;
+        self.get_object(value_id)?;
+        self.scope_mut().binding.insert(var_name_id, value_id);
+        Ok(value_id)
+    }
+
+    fn get_variable(&mut self, var_name_id: ObjectId) -> ObjectResult {
+        let var_name = self.get_object(var_name_id)?.expect_string()?;
+        for Scope { binding, .. } in self.scope_stack.iter() {
+            if let Some(&value_id) = binding.get(&var_name_id) {
+                return Ok(value_id);
+            }
+        }
+
+        Err(VariableNotFound(var_name.clone()))
+    }
+
+    fn add_facet(&mut self, target_id: ObjectId, facet_id: ObjectId) -> EmptyResult {
+        self.get_object_mut(target_id)?.add_facet(facet_id);
+        Ok(())
+    }
+
+    fn add_facet_with_name(&mut self, target_id: ObjectId, facet_name: &str) -> EmptyResult {
+        let facet_id = self.lookup_facet(facet_name)?;
+        self.add_facet(target_id, facet_id)
+    }
+
+    fn add_method(&mut self, facet_id: ObjectId, method: Method) -> EmptyResult {
+        let name = self.string(&method.name)?;
+        let method_obj = self.create_object_with_value(Value::Method(method))?;
+        let facet = self.get_object_mut(facet_id)?.expect_facet_mut()?;
+        facet.methods.insert(name, method_obj);
+        Ok(())
+    }
+
+    pub fn init(&mut self) -> Result<(), ErrorKind> {
+        self.init_object_facet()?;
+        self.init_string_facet()?;
+        self.init_int_facet()?;
+        self.init_method_facet()?;
+        self.init_facet_facet()?;
         self.init_nil()?;
         Ok(())
     }
 
-    fn init_class_class(&mut self) -> EmptyResult {
-        self.create_class("Class".to_string())?;
+    fn init_int_facet(&mut self) -> EmptyResult {
+        self.create_facet("Int")?;
         Ok(())
     }
 
-    fn init_integer_class(&mut self) -> EmptyResult {
-        self.create_class("Integer".to_string())?;
+    fn init_string_facet(&mut self) -> EmptyResult {
+        self.create_facet("String")?;
         Ok(())
     }
 
-    fn init_string_class(&mut self) -> EmptyResult {
-        self.create_class("String".to_string())?;
+    fn init_method_facet(&mut self) -> EmptyResult {
+        self.create_facet("Method")?;
+        Ok(())
+    }
+
+    fn init_facet_facet(&mut self) -> EmptyResult {
+        self.create_facet("Facet")?;
         Ok(())
     }
 
     fn init_nil(&mut self) -> EmptyResult {
-        let class = self.create_class("Nil".to_string())?;
-        let nil = self.create_object(class);
-        self.define_global("nil".to_string(), nil);
-        self.nil = nil;
+        self.create_facet("Nil")?;
+        self.nil = self.create_object_of_facet("Nil")?;
         Ok(())
     }
 
-    fn define_method(&mut self,
-                     target: ObjectId,
-                     name: &str,
-                     receiver: Receiver,
-                     params: Vec<Node>,
-                     body: MethodBody,
-    ) -> EmptyResult {
-        let name_obj = self.create_string(name.to_string())?;
-        self.get_object_mut(target)?
-            .add_method(name_obj, Method {
-                name: name.to_string(),
-                receiver,
-                params,
-                body,
-            });
-        Ok(())
-    }
+    fn init_object_facet(&mut self) -> EmptyResult {
+        let facet_id = self.create_bare_facet("Object")?;
 
-    fn init_object_class(&mut self) -> EmptyResult {
-        let class = self.create_class("Object".to_string())?;
+        self.add_method(
+            facet_id,
+            Method {
+                name: "property_get".to_string(),
+                receiver: Receiver::Instance,
+                params: ident_list(&["name"]),
+                body: MethodBody::Internal(object_property_get),
+            },
+        )?;
 
-        self.define_method(
-            class,
-            "property_get",
-            Receiver::Instance,
-            ident_list(&["name"]),
-            MethodBody::Native(Box::new(|ctx, this, args| {
-                let &[name] = args else { return Err(Unknown); };
-                let this = ctx.get_object(this)?;
-                let name = ctx.get_object(name)?;
-                let name_string = name.expect_string()?;
-                let value = this.get_property(name.id).ok_or_else(|| PropertyNotFound(name_string.clone()))?;
-                Ok(value)
-            })))?;
+        self.add_method(
+            facet_id,
+            Method {
+                name: "property_set".to_string(),
+                receiver: Receiver::Instance,
+                params: ident_list(&["name", "value"]),
+                body: MethodBody::Internal(object_property_set),
+            },
+        )?;
 
-        self.define_method(
-            class,
-            "property_set",
-            Receiver::Instance,
-            ident_list(&["name", "value"]),
-            MethodBody::Native(Box::new(|ctx, this, args| {
-                let &[name, value] = args else { return Err(Unknown); };
-                ctx.get_object(name)?.expect_string()?;
-                ctx.get_object(value)?;
-                ctx.get_object_mut(this)?.set_property(name, value);
-                Ok(ctx.nil)
-            })))?;
-
+        self.add_method(
+            facet_id,
+            Method {
+                name: "facets".to_string(),
+                receiver: Receiver::Instance,
+                params: ident_list(&[]),
+                body: MethodBody::Internal(object_facets),
+            },
+        )?;
 
         Ok(())
     }
 
-    fn call(&mut self) {}
+    pub fn eval(&mut self, node: &Node) -> ObjectResult {
+        match node {
+            Node::Literal { value } => match value {
+                Literal::String(string) => self.string(string),
+                Literal::Int(int) => self.create_object_with_value(Value::Int(*int)),
+            },
+            Node::Nil => Ok(self.nil),
+            Node::Phrase { .. } => Err(Unimplemented(node.clone())),
+            Node::Grouping { .. } => Err(Unimplemented(node.clone())),
+            Node::Binary { .. } => Err(Unimplemented(node.clone())),
+            Node::Assignment { .. } => Err(Unimplemented(node.clone())),
+            Node::Unary { .. } => Err(Unimplemented(node.clone())),
+            Node::Access { .. } => Err(Unimplemented(node.clone())),
+            Node::Sequence { .. } => Err(Unimplemented(node.clone())),
+            Node::Path { .. } => Err(Unimplemented(node.clone())),
+            Node::Nomen { .. } => Err(Unimplemented(node.clone())),
+            Node::Ident { .. } => Err(Unimplemented(node.clone())),
+        }
+    }
 
-    fn create_string(&mut self, string: String) -> ObjectResult {
-        let id = match self.strings.get(&string) {
-            Some(&id) => id,
-            None => {
-                let id = self.create_value_object(Value::String(string.clone()))?;
-                self.strings.insert(string, id);
-                id
+    fn string(&mut self, string: &str) -> ObjectResult {
+        Ok(
+            match self.strings.get(string) {
+                Some(&id) => id,
+                None => {
+                    let id = self.create_object_with_value(Value::String(string.to_string()))?;
+                    self.strings.insert(string.to_string(), id);
+                    id
+                }
             }
-        };
+        )
+    }
+
+    fn create_object_with_value(&mut self, value: Value) -> ObjectResult {
+        let id = self.create_object_of_facet(value.facet_name())?;
+        self.get_object_mut(id)?.value = value;
         Ok(id)
     }
 
-    fn create_value_object(&mut self, rust_val: Value) -> ObjectResult {
-        let class = self.lookup_class(rust_val.class_name())?;
-        let id = self.create_object(class);
-        self.get_object_mut(id)?.rust_val = rust_val;
-        Ok(id)
+    fn set_property(&mut self, target_id: ObjectId, key_string: &str, value_id: ObjectId) -> ObjectResult {
+        let key_id = self.string(&key_string)?;
+        self.get_object_mut(target_id)?.set_property(key_id, value_id);
+        Ok(value_id)
     }
 
-    fn define_global(&mut self, name: String, value: ObjectId) {
-        self.globals.insert(name, value);
+    fn create_bare_facet(&mut self, facet_name: &str) -> ObjectResult {
+        let facet_id = self.create_object();
+        self.facet_by_name.insert(facet_name.to_string(), facet_id);
+        let name_string = self.string(&facet_name)?;
+        self.set_property(
+            facet_id,
+            "name",
+            name_string,
+        )?;
+        Ok(facet_id)
     }
 
-    fn set_property(&mut self, target: ObjectId, key: String, value: ObjectId) -> ObjectResult {
-        let key_obj = self.create_string(key)?;
-        self.get_object_mut(target)?.set_property(key_obj, value);
-        Ok(value)
+    fn create_facet(&mut self, facet_name: &str) -> ObjectResult {
+        let facet_id = self.create_bare_facet(facet_name)?;
+        self.add_facet_with_name(facet_id, "Object")?;
+        Ok(facet_id)
     }
 
-    fn create_class(&mut self, name: String) -> ObjectResult {
-        let class = self.create_object(CLASS_CLASS);
-        self.class_by_name.insert(name.clone(), class);
-        let name_obj = self.create_string(name.clone())?;
-        self.set_property(class, "name".to_string(), name_obj)?;
-        Ok(class)
+    fn call_method(&mut self, target_id: ObjectId, receiver: Receiver, method_name_id: ObjectId, args: &[ObjectId]) -> ObjectResult {
+        let target = self.get_object(target_id)?;
+        let method_name = self.get_object(method_name_id)?.expect_string()?;
+        for &facet_id in target.facets.iter() {
+            let facet = self.get_object(facet_id)?.expect_facet()?;
+            let Some(&method_id) = facet.methods.get(&method_name_id) else {
+                continue;
+            };
+            let method = self.get_object(method_id)?.expect_method()?;
+            if method.receiver != receiver {
+                continue;
+            }
+            let method_body = match method.body {
+                MethodBody::Internal(method_fn) => {
+                    return method_fn(self, target_id, args);
+                },
+                MethodBody::User(ref node) => node,
+            };
+            if method.params.len() != args.len() {
+                return Err(ArityError {
+                    expected: method.params.len(),
+                    actual: args.len(),
+                    method_name: method_name.clone(),
+                });
+            }
+            self.push_scope(method_name.clone());
+            self.set_variable(self.string("self")?, target_id)?;
+            for (param, &arg) in method.params.iter().zip(args) {
+                let Node::Ident { name } = param else {
+                    return Err(Unknown);
+                };
+                self.set_variable(self.string(name)?, arg)?;
+            }
+            self.eval(method_body)?;
+            self.pop_scope();
+        }
+        Err(MethodNotFound { name: method_name.clone(), target_id })
     }
+
 
     fn get_object(&self, id: ObjectId) -> Result<&Object, ErrorKind> {
         self.objects.get(id as usize).ok_or_else(|| ObjectNotFound(id))
@@ -273,18 +487,10 @@ impl Interpreter {
         self.objects.get_mut(id as usize).ok_or_else(|| ObjectNotFound(id))
     }
 
-    fn get_class(&self, name: &str) -> Result<&Object, ErrorKind> {
-        self.get_object(self.lookup_class(name)?)
-    }
-
-    fn get_class_mut(&mut self, name: &str) -> Result<&mut Object, ErrorKind> {
-        self.get_object_mut(self.lookup_class(name)?)
-    }
-
-    fn lookup_class(&self, name: &str) -> ObjectResult {
-        self.class_by_name
+    fn lookup_facet(&self, name: &str) -> ObjectResult {
+        self.facet_by_name
             .get(name)
             .cloned()
-            .ok_or_else(|| ClassNotFound(name.to_string()))
+            .ok_or_else(|| FacetNotFound(name.to_string()))
     }
 }

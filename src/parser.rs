@@ -1,3 +1,4 @@
+use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use ErrorKind::MatchExhausted;
@@ -15,6 +16,19 @@ pub enum ParserError {
     ScanError(ScannerError),
     ParseError { kind: ErrorKind, loc: Location, derivation: Derivation },
 }
+
+impl Display for ParserError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParserError::ScanError(err) =>
+                write!(f, "ScanError({err})"),
+            ParseError { kind, loc, derivation } =>
+                write!(f, "{derivation}\n\n{kind:?} at {loc}")
+        }
+    }
+}
+
+impl Error for ParserError {}
 
 #[derive(Debug)]
 pub enum ErrorKind {
@@ -364,7 +378,7 @@ impl Parser {
         let IntLit(value) = self.advance() else {
             return self.consume_failed("integer");
         };
-        let node = Node::Literal { value: Literal::Integer(value) };
+        let node = Node::Literal { value: Literal::Int(value) };
         self.returning("integer", &node);
         Ok(node)
     }

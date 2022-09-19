@@ -1,4 +1,4 @@
-some_func a b
-  a + b
-  
-&some_func/2
+
+Person =
+  id Int
+  name String

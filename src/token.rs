@@ -1,12 +1,12 @@
 use std::fmt::{Display, Formatter};
-use crate::types::Integer;
+use crate::types::Int;
 
 #[derive(Debug, Clone)]
 pub enum Token {
     Ident(String),
     Nomen(String),
     Sym(&'static str),
-    IntLit(Integer),
+    IntLit(Int),
     StrLit(String),
     Newline,
     Indent,

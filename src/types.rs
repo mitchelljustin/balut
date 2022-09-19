@@ -1,1 +1,1 @@
-pub type Integer = i32;
+pub type Int = i64;

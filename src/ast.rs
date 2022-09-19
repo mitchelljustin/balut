@@ -1,23 +1,23 @@
 use std::fmt::{Display, Formatter, Write};
 
-use crate::types::Integer;
+use crate::types::Int;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Literal {
     String(String),
-    Integer(Integer),
+    Int(Int),
 }
 
 impl Display for Literal {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Literal::String(value) => write!(f, "\"{value}\""),
-            Literal::Integer(value) => write!(f, "{value}")
+            Literal::Int(value) => write!(f, "{value}")
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Node {
     Literal { value: Literal },
     Phrase { terms: Vec<Node> },
@@ -26,6 +26,7 @@ pub enum Node {
     Assignment { target: Box<Node>, operator: &'static str, value: Box<Node> },
     Unary { operator: &'static str, body: Box<Node> },
     Sequence { statements: Vec<Node> },
+    Access { target: Box<Node>, member: Box<Node> },
     Path { components: Vec<Node> },
     Nomen { name: String },
     Ident { name: String },
@@ -68,6 +69,8 @@ impl Display for Node {
                 write!(f, "‹{lhs} {operator} {rhs}›"),
             Node::Assignment { target, operator, value } =>
                 write!(f, "{target} {operator} {value}"),
+            Node::Access { target, member } =>
+                write!(f, "{target}.{member}"),
             Node::Unary { body, operator } =>
                 write!(f, "{operator}{body}"),
             Node::Nil =>

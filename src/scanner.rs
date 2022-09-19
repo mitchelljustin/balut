@@ -1,15 +1,27 @@
+use std::error::Error;
+use std::fmt::{Display, Formatter};
 use std::num::ParseIntError;
 use std::str::FromStr;
 
 use crate::scanner::ErrorKind::{IllegalChar, IntParseFailed};
 use crate::token::{sym_allowed, Location, ScannedToken, Token};
 use crate::token::Token::*;
+use crate::types::Int;
 
 #[derive(Debug)]
 pub struct ScannerError {
     kind: ErrorKind,
     loc: Location,
 }
+
+impl Display for ScannerError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let ScannerError { kind, loc } = self;
+        write!(f, "{kind:?} at {loc}")
+    }
+}
+
+impl Error for ScannerError {}
 
 #[derive(Debug)]
 pub enum ErrorKind {
@@ -150,7 +162,7 @@ impl Scanner {
     fn number(&mut self) -> Result<(), ErrorKind> {
         consume_all!(self, '0'..='9');
         let lexeme = self.lexeme();
-        let value = i32::from_str(&lexeme).map_err(IntParseFailed)?;
+        let value = Int::from_str(&lexeme).map_err(IntParseFailed)?;
         self.add(IntLit(value));
         Ok(())
     }
@@ -186,7 +198,7 @@ impl Scanner {
     fn ident_like(&mut self, make_token: impl FnOnce(String) -> Token) {
         self.consume_all_alphanum();
         let name = self.lexeme();
-        
+
         self.add(make_token(name))
     }
 
