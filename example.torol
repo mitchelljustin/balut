@@ -1,7 +1,14 @@
-f
-  [
-    1
-    2
-  ]
+ToString =
+  to_s = ()
 
-g a + b, &c
+
+Person =
+  name String
+  id Int
+
+  ToString
+    to_s = "{name} id={id}"
+
+p = Person
+  name="Mitch"
+  id=1

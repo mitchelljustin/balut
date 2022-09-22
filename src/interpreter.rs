@@ -379,12 +379,8 @@ impl Interpreter {
 
     pub fn eval(&mut self, node: Node) -> ObjectResult {
         match node {
-            Node::Literal { value } => match value {
-                Literal::String(ref string) => self.string(string),
-                Literal::Int(int) => self.create_object_with_value(Value::Int(int)),
-                Literal::Array(_elements) => Ok(self.nil),// todo
-            },
-            Node::Nil => Ok(self.nil),
+            Node::Literal { .. } => Err(Unimplemented(node.clone())),
+            Node::Nil => Err(Unimplemented(node.clone())),
             Node::Phrase { .. } => Err(Unimplemented(node.clone())),
             Node::Grouping { .. } => Err(Unimplemented(node.clone())),
             Node::Binary { .. } => Err(Unimplemented(node.clone())),
@@ -395,6 +391,7 @@ impl Interpreter {
             Node::Path { .. } => Err(Unimplemented(node.clone())),
             Node::Nomen { .. } => Err(Unimplemented(node.clone())),
             Node::Ident { .. } => Err(Unimplemented(node.clone())),
+            Node::Annotation { .. } => Err(Unimplemented(node.clone())),
         }
     }
 

@@ -5,7 +5,7 @@ use std::fmt::{Display, Formatter};
 use ErrorKind::MatchExhausted;
 
 use crate::ast::{Literal, Node};
-use crate::parser::ErrorKind::{ConsumeFailed, ExpectedIndent, IllegalFinalSequence, IllegalSyntheticNewline, Unknown};
+use crate::parser::ErrorKind::{ConsumeFailed, ExpectedIndent, IllegalLiteral, Unknown};
 use crate::parser::ParserError::ParseError;
 use crate::scanner;
 use crate::scanner::ScannerError;
@@ -35,9 +35,8 @@ impl Error for ParserError {}
 pub enum ErrorKind {
     ConsumeFailed { expected: &'static str, actual: Token },
     MatchExhausted { rule: &'static str, token: Token },
+    IllegalLiteral { reason: &'static str, node: Option<Node> },
     ExpectedIndent,
-    IllegalFinalSequence,
-    IllegalSyntheticNewline,
     Unknown,
 }
 
@@ -202,11 +201,16 @@ impl Parser {
             self.increment();
         }
         let mut elements = Vec::new();
+        let mut should_continue = true;
         while !matches!(self.current(), EOF) {
+            if !should_continue {
+                return self.consume_failed("newline after statement");
+            }
             let statement = self.statement()?;
             self.add_step("program", format!("appending {statement}"));
             elements.push(statement);
-            if let Newline = self.current() {
+            should_continue = matches!(self.current(), Newline);
+            if should_continue {
                 self.increment();
             }
             self.add_step("program", format!("consuming any whitespace after statement"));
@@ -364,7 +368,7 @@ impl Parser {
         let mut elements = Vec::new();
         let mut is_at_end = false;
         while !should_terminate(self.current()) && !is_at_end {
-            let element = self.expression()?;
+            let element = self.annotation()?;
             self.add_step("multi_list", format!("adding element '{element}'"));
             elements.push(element);
             if matches!(self.current(), Sym(",")) {
@@ -375,6 +379,17 @@ impl Parser {
         }
         self.returning_list("multi_list", &elements);
         Ok(elements)
+    }
+
+    fn annotation(&mut self) -> NodeResult {
+        self.entering("annotation");
+        let mut node = self.unary_high()?;
+        if matches!(self.current(), Nomen(_)) {
+            let ty = self.path()?;
+            node = Node::Annotation { value: Box::new(node), ty: Box::new(ty) };
+        }
+        self.returning("annotation", &node);
+        Ok(node)
     }
 
     fn unary_high(&mut self) -> NodeResult {
@@ -398,27 +413,59 @@ impl Parser {
             IntLit(_) => self.integer(),
             StrLit(_) => self.string(),
             Sym("(") => self.grouping(),
-            Sym("[") => self.array(),
+            Sym("[") => self.array_dict(),
             Nomen(_) => self.path(),
-            // Newline => {
-            //     if !matches!(self.next(), Indent) {
-            //         return Err(ExpectedIndent);
-            //     }
-            //     self.sequence(false)
-            // }
+            Newline => {
+                if !matches!(self.next(), Indent) {
+                    return Err(ExpectedIndent);
+                }
+                self.sequence()
+            }
             _ => self.match_exhausted("primary"),
         }
     }
 
-    fn array(&mut self) -> NodeResult {
-        self.entering("array");
+    fn array_dict(&mut self) -> NodeResult {
+        self.entering("array_dict");
         consume!(self, Sym("["));
+        if let Sym("=") = self.current() {
+            self.increment();
+            consume!(self, Sym("]"));
+            let node = Node::Literal { value: Literal::Dict(HashMap::new()) };
+            self.returning("array_dict", &node);
+            return Ok(node);
+        }
         let elements = self.multi_list(
             |t| matches!(t, Sym("]"))
         )?;
-        self.increment();
-        let node = Node::Literal { value: Literal::Array(elements) };
-        self.returning("array", &node);
+        consume!(self, Sym("]"));
+        let n_dict_items = elements.iter()
+            .filter(|el| matches!(el, Node::Assignment { .. }))
+            .count();
+
+        let value =
+            if n_dict_items == elements.len() {
+                let mut dict = HashMap::new();
+                for assn in elements {
+                    let Node::Assignment { target, value, operator: "=" } = assn else {
+                        return Err(IllegalLiteral { reason: "dict entries must be of form [key]=[value]", node: Some(assn) });
+                    };
+                    let Node::Ident { name } = *target else {
+                        return Err(IllegalLiteral { reason: "dict key must be an ident", node: Some(*target) });
+                    };
+                    if let Node::Assignment { .. } = *value {
+                        return Err(IllegalLiteral { reason: "dict value must be an expr", node: Some(*value) });
+                    }
+                    dict.insert(name, *value);
+                }
+                Literal::Dict(dict)
+            } else if n_dict_items == 0 {
+                Literal::Array(elements)
+            } else {
+                return Err(IllegalLiteral { reason: "illegal dict or array", node: None });
+            };
+        let node = Node::Literal { value };
+        self.returning("array_dict", &node);
         Ok(node)
     }
 
@@ -487,10 +534,7 @@ impl Parser {
             let component = self.nomen()?;
             components.push(component);
         }
-        let node = match <[Node; 1]>::try_from(components) {
-            Ok([nomen]) => nomen,
-            Err(components) => Node::Path { components },
-        };
+        let node = Node::Path { components };
         self.returning("path", &node);
         Ok(node)
     }
