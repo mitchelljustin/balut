@@ -4,11 +4,11 @@ use std::num::ParseIntError;
 use std::str::FromStr;
 
 use crate::scanner::ErrorKind::{IllegalChar, IntParseFailed};
-use crate::token::{sym_allowed, Location, ScannedToken, Token};
+use crate::token::{Location, ScannedToken, sym_allowed, Token};
 use crate::token::Token::*;
 use crate::types::Int;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ScannerError {
     kind: ErrorKind,
     loc: Location,
@@ -23,7 +23,7 @@ impl Display for ScannerError {
 
 impl Error for ScannerError {}
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ErrorKind {
     IllegalChar(char),
     IntParseFailed(ParseIntError),
@@ -53,11 +53,7 @@ pub fn scan(source: &str) -> Result<Vec<ScannedToken>, ScannerError> {
 impl Scanner {
     fn new(source: &str) -> Scanner {
         let mut source: Vec<char> = source.chars().collect();
-        if let Some(&ch) = source.last() {
-            if ch != '\n' {
-                source.push('\n');
-            }
-        }
+        source.push('\n');
         Scanner {
             source,
             tokens: Default::default(),
@@ -128,18 +124,22 @@ impl Scanner {
     }
 
     fn newline(&mut self) -> Result<(), ErrorKind> {
-        self.add(Newline);
         consume_all!(self, ' ');
         let num_spaces = (self.index - self.start - 1) as i32;
-        let level = num_spaces / SPACES_PER_INDENT;
-        let diff = level - self.indent_level;
-        for _ in 0..diff {
-            self.add(Indent);
+        let indent_level = num_spaces / SPACES_PER_INDENT;
+        let indent_diff = indent_level - self.indent_level;
+        if indent_diff >= 0 {
+            self.add(Newline);
+            for _ in 0..indent_diff {
+                self.add(Indent);
+            }
+        } else {
+            for _ in indent_diff..0 {
+                self.add(Dedent);
+            }
+            self.add(Newline);
         }
-        for _ in diff..0 {
-            self.add(Dedent);
-        }
-        self.indent_level = level;
+        self.indent_level = indent_level;
         self.loc.col = 0;
         self.loc.line += 1;
         Ok(())

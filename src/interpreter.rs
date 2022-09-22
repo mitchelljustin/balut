@@ -6,7 +6,7 @@ use crate::ast::{Literal, Node};
 use crate::interpreter::ErrorKind::{ArityError, FacetNotFound, MethodNotFound, ObjectNotFound, PropertyNotFound, TypeError, Unimplemented, Unknown, VariableNotFound};
 use crate::types::Int;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Receiver {
     Module,
     Instance,
@@ -14,6 +14,7 @@ pub enum Receiver {
 
 type MethodFn = fn(&mut Interpreter, ObjectId, &[ObjectId]) -> ObjectResult;
 
+#[derive(Clone)]
 pub enum MethodBody {
     Internal(MethodFn),
     User(Node),
@@ -28,7 +29,7 @@ impl Debug for MethodBody {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Method {
     name: String,
     params: Vec<Node>,
@@ -376,11 +377,12 @@ impl Interpreter {
         Ok(())
     }
 
-    pub fn eval(&mut self, node: &Node) -> ObjectResult {
+    pub fn eval(&mut self, node: Node) -> ObjectResult {
         match node {
             Node::Literal { value } => match value {
-                Literal::String(string) => self.string(string),
-                Literal::Int(int) => self.create_object_with_value(Value::Int(*int)),
+                Literal::String(ref string) => self.string(string),
+                Literal::Int(int) => self.create_object_with_value(Value::Int(int)),
+                Literal::Array(_elements) => Ok(self.nil),// todo
             },
             Node::Nil => Ok(self.nil),
             Node::Phrase { .. } => Err(Unimplemented(node.clone())),
@@ -441,41 +443,44 @@ impl Interpreter {
 
     fn call_method(&mut self, target_id: ObjectId, receiver: Receiver, method_name_id: ObjectId, args: &[ObjectId]) -> ObjectResult {
         let target = self.get_object(target_id)?;
-        let method_name = self.get_object(method_name_id)?.expect_string()?;
-        for &facet_id in target.facets.iter() {
+        let facets = target.facets.clone();
+        for facet_id in facets.into_iter() {
             let facet = self.get_object(facet_id)?.expect_facet()?;
             let Some(&method_id) = facet.methods.get(&method_name_id) else {
                 continue;
             };
-            let method = self.get_object(method_id)?.expect_method()?;
+            let method = self.get_object(method_id)?.expect_method()?.clone();
             if method.receiver != receiver {
                 continue;
             }
             let method_body = match method.body {
-                MethodBody::Internal(method_fn) => {
-                    return method_fn(self, target_id, args);
-                },
+                MethodBody::Internal(internal_fn) => {
+                    return internal_fn(self, target_id, args);
+                }
                 MethodBody::User(ref node) => node,
             };
             if method.params.len() != args.len() {
                 return Err(ArityError {
                     expected: method.params.len(),
                     actual: args.len(),
-                    method_name: method_name.clone(),
+                    method_name: method.name.clone(),
                 });
             }
-            self.push_scope(method_name.clone());
-            self.set_variable(self.string("self")?, target_id)?;
+            self.push_scope(method.name.clone());
+            let self_string = self.string("self")?;
+            self.set_variable(self_string, target_id)?;
             for (param, &arg) in method.params.iter().zip(args) {
                 let Node::Ident { name } = param else {
                     return Err(Unknown);
                 };
-                self.set_variable(self.string(name)?, arg)?;
+                let name_string = self.string(name)?;
+                self.set_variable(name_string, arg)?;
             }
-            self.eval(method_body)?;
+            self.eval(method_body.clone())?;
             self.pop_scope();
         }
-        Err(MethodNotFound { name: method_name.clone(), target_id })
+        let name = self.get_object(method_name_id)?.expect_string()?.clone();
+        Err(MethodNotFound { name, target_id })
     }
 
 

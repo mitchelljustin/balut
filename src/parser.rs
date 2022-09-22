@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -11,7 +12,7 @@ use crate::scanner::ScannerError;
 use crate::token::{Location, ScannedToken, Token};
 use crate::token::Token::*;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ParserError {
     ScanError(ScannerError),
     ParseError { kind: ErrorKind, loc: Location, derivation: Derivation },
@@ -30,7 +31,7 @@ impl Display for ParserError {
 
 impl Error for ParserError {}
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ErrorKind {
     ConsumeFailed { expected: &'static str, actual: Token },
     MatchExhausted { rule: &'static str, token: Token },
@@ -69,7 +70,6 @@ impl Display for Derivation {
 pub struct Parser {
     tokens: Vec<ScannedToken>,
     index: usize,
-    synthetic_newlines: usize,
     derivation: Derivation,
 }
 
@@ -105,7 +105,7 @@ mod patterns {
     $crate::token::Token::Newline |
     $crate::token::Token::EOF |
     $crate::token::Token::Dedent |
-    sym_union![")"] |
+    sym_union![")" | "," | "]"] |
     binary!() |
     assignment!()
     }
@@ -124,7 +124,6 @@ impl Parser {
         Parser {
             tokens,
             index: 0,
-            synthetic_newlines: 0,
             derivation: Default::default(),
         }
     }
@@ -141,7 +140,16 @@ impl Parser {
     }
 
     fn returning(&mut self, rule: &str, node: &Node) {
-        self.add_step(rule, format!("returning '{node}'"))
+        self.add_step(rule, format!("returning '{node}'"));
+    }
+
+    fn returning_list(&mut self, rule: &str, nodes: &[Node]) {
+        let string = nodes
+            .iter()
+            .map(|n| format!("'{n}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.add_step(rule, format!("returning {string}"));
     }
 
     fn token_at(&self, offset: isize) -> &ScannedToken {
@@ -172,7 +180,7 @@ impl Parser {
     }
 
     fn parse(mut self) -> Result<Node, ParserError> {
-        match self.sequence(true) {
+        match self.program() {
             Ok(root) => {
                 let derivation = self.derivation;
                 println!("Derivation OK: \n{derivation}");
@@ -187,12 +195,36 @@ impl Parser {
         }
     }
 
+    fn program(&mut self) -> NodeResult {
+        self.entering("program");
+        self.add_step("program", format!("consuming whitespace before program"));
+        while matches!(self.current(), patterns::whitespace!()) {
+            self.increment();
+        }
+        let mut elements = Vec::new();
+        while !matches!(self.current(), EOF) {
+            let statement = self.statement()?;
+            self.add_step("program", format!("appending {statement}"));
+            elements.push(statement);
+            if let Newline = self.current() {
+                self.increment();
+            }
+            self.add_step("program", format!("consuming any whitespace after statement"));
+            while matches!(self.current(), patterns::whitespace!()) {
+                self.increment();
+            }
+        }
+        let node = Node::Sequence { elements };
+        self.returning("program", &node);
+        Ok(node)
+    }
+
     fn match_exhausted(&self, rule: &'static str) -> NodeResult {
         Err(MatchExhausted { rule, token: self.current().clone() })
     }
 
-    fn consume_failed(&self, expected: &'static str) -> NodeResult {
-        Err(ConsumeFailed { expected, actual: self.previous().clone() })
+    fn consume_failed<T>(&self, expected: &'static str) -> Result<T, ErrorKind> {
+        Err(ConsumeFailed { expected, actual: self.current().clone() })
     }
 
     fn advance(&mut self) -> Token {
@@ -200,60 +232,50 @@ impl Parser {
         self.previous().clone()
     }
 
-    fn sequence(&mut self, top_level: bool) -> NodeResult {
+    fn sequence(&mut self) -> NodeResult {
         self.entering("sequence");
         let mut indent_level = 0;
-        if top_level {
-            while matches!(self.current(), patterns::whitespace!()) {
-                self.add_step("sequence", format!("consuming space after statement"));
-                self.increment();
-            }
-        } else {
-            self.add_step("sequence", format!("consuming newline+indent"));
-            consume!(self, Newline);
-            while let Indent = self.current() {
-                indent_level += 1;
-                self.add_step("sequence", format!("consuming indent {indent_level}"));
-                self.increment();
-            }
-            if indent_level == 0 {
-                return self.consume_failed("indent");
-            }
+        self.add_step("sequence", format!("consuming newline"));
+        consume!(self, Newline);
+        while let Indent = self.current() {
+            indent_level += 1;
+            self.add_step("sequence", format!("consuming indent {indent_level}"));
+            self.increment();
         }
-        let mut statements = Vec::new();
-        while (!top_level && !matches!(self.current(), Dedent))
-            || (top_level && !matches!(self.current(), EOF)) {
-            let statement = self.statement()?;
-            self.add_step("sequence", format!("appending '{statement}'"));
-            statements.push(statement);
-            if top_level {
-                while matches!(self.current(), patterns::whitespace!()) {
-                    self.add_step("sequence", format!("consuming space after statement"));
+        if indent_level == 0 {
+            return self.consume_failed("indent");
+        }
+        let mut elements = Vec::new();
+        loop {
+            let element = self.statement()?;
+            self.add_step("sequence", format!("appending '{element}'"));
+            elements.push(element);
+            match self.current() {
+                Newline => {
+                    self.add_step("sequence", format!("consuming newline(s) after statement"));
                     self.increment();
+                    while let Newline = self.current() {
+                        self.increment();
+                    }
                 }
+                Dedent => {
+                    break;
+                }
+                _ => return self.consume_failed("newline or dedent")
             }
         }
         for i in 1..=indent_level {
             self.add_step("sequence", format!("consuming dedent {i}"));
             consume!(self, Dedent);
         }
-        self.synthetic_newlines += 1;
-        let node = Node::Sequence { statements };
+        consume!(self, Newline);
+        let node = Node::Sequence { elements };
         self.returning("sequence", &node);
         Ok(node)
     }
 
     fn statement(&mut self) -> NodeResult {
-        self.entering("statement");
-        let node = self.assignment()?;
-        if self.synthetic_newlines > 0 {
-            self.add_step("statement", format!("consuming synthetic newline {}", self.synthetic_newlines));
-            self.synthetic_newlines -= 1;
-        } else {
-            consume!(self, Newline);
-        }
-        self.returning("statement", &node);
-        Ok(node)
+        self.assignment()
     }
 
     fn assignment(&mut self) -> NodeResult {
@@ -270,6 +292,7 @@ impl Parser {
             };
             self.add_step("assignment", format!("collecting '{node}'"));
         }
+        self.returning("assignment", &node);
         Ok(node)
     }
 
@@ -315,23 +338,12 @@ impl Parser {
         self.entering("phrase");
         let head = self.unary_high()?;
         let mut terms = vec![head];
-        while !matches!(self.current(), patterns::phrase_terminator!()) {
-            let term = self.unary_high()?;
-            self.add_step("phrase", format!("adding term '{term}'"));
-            terms.push(term);
-        }
-        if matches!(self.current(), Newline) && matches!(self.next(), Indent) {
-            let Node::Sequence { mut statements } = self.sequence(false)? else {
-                return Err(Unknown);
-            };
-            let stmts_string = statements.iter()
-                .map(|t| format!("{t}"))
-                .collect::<Vec<_>>()
-                .join("; ");
-            self.add_step("phrase", format!("adding terms from sequence '{stmts_string}'"));
-            terms.append(&mut statements);
-        }
-        let node = match <[Node; 1]>::try_from(terms) {
+        let mut elements = self.multi_list(
+            |t| matches!(t, patterns::phrase_terminator!()),
+        )?;
+        terms.append(&mut elements);
+
+        let node = match <[_; 1]>::try_from(terms) {
             Ok([head]) => head,
             Err(terms) => Node::Phrase { terms },
         };
@@ -339,6 +351,31 @@ impl Parser {
         Ok(node)
     }
 
+    fn multi_list(&mut self, should_terminate: impl Fn(&Token) -> bool) -> Result<Vec<Node>, ErrorKind> {
+        self.entering("multi_list");
+        if matches!(self.current(), Newline) && matches!(self.next(), Indent) {
+            self.add_step("multi_list", format!("adding from sequence"));
+            let Node::Sequence { elements } = self.sequence()? else {
+                return Err(Unknown);
+            };
+            self.returning_list("multi_list", &elements);
+            return Ok(elements);
+        }
+        let mut elements = Vec::new();
+        let mut is_at_end = false;
+        while !should_terminate(self.current()) && !is_at_end {
+            let element = self.expression()?;
+            self.add_step("multi_list", format!("adding element '{element}'"));
+            elements.push(element);
+            if matches!(self.current(), Sym(",")) {
+                self.increment();
+            } else {
+                is_at_end = true;
+            }
+        }
+        self.returning_list("multi_list", &elements);
+        Ok(elements)
+    }
 
     fn unary_high(&mut self) -> NodeResult {
         self.entering("unary_high");
@@ -361,17 +398,29 @@ impl Parser {
             IntLit(_) => self.integer(),
             StrLit(_) => self.string(),
             Sym("(") => self.grouping(),
+            Sym("[") => self.array(),
             Nomen(_) => self.path(),
-            Newline => {
-                if !matches!(self.next(), Indent) {
-                    return Err(ExpectedIndent);
-                }
-                self.sequence(false)
-            }
+            // Newline => {
+            //     if !matches!(self.next(), Indent) {
+            //         return Err(ExpectedIndent);
+            //     }
+            //     self.sequence(false)
+            // }
             _ => self.match_exhausted("primary"),
         }
     }
 
+    fn array(&mut self) -> NodeResult {
+        self.entering("array");
+        consume!(self, Sym("["));
+        let elements = self.multi_list(
+            |t| matches!(t, Sym("]"))
+        )?;
+        self.increment();
+        let node = Node::Literal { value: Literal::Array(elements) };
+        self.returning("array", &node);
+        Ok(node)
+    }
 
     fn integer(&mut self) -> NodeResult {
         self.entering("integer");
