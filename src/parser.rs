@@ -104,7 +104,7 @@ mod patterns {
     $crate::token::Token::Newline |
     $crate::token::Token::EOF |
     $crate::token::Token::Dedent |
-    sym_union![")" | "," | "]"] |
+    sym_union![")" | "," | "]" | ":"] |
     binary!() |
     assignment!()
     }
@@ -196,10 +196,7 @@ impl Parser {
 
     fn program(&mut self) -> NodeResult {
         self.entering("program");
-        self.add_step("program", format!("consuming whitespace before program"));
-        while matches!(self.current(), patterns::whitespace!()) {
-            self.increment();
-        }
+        self.consume_any_whitespace("program");
         let mut elements = Vec::new();
         let mut should_continue = true;
         while !matches!(self.current(), EOF) {
@@ -213,14 +210,18 @@ impl Parser {
             if should_continue {
                 self.increment();
             }
-            self.add_step("program", format!("consuming any whitespace after statement"));
-            while matches!(self.current(), patterns::whitespace!()) {
-                self.increment();
-            }
+            self.consume_any_whitespace("program");
         }
         let node = Node::Sequence { elements };
         self.returning("program", &node);
         Ok(node)
+    }
+
+    fn consume_any_whitespace(&mut self, rule: &'static str) {
+        self.add_step(rule, format!("consuming any whitespace"));
+        while matches!(self.current(), patterns::whitespace!()) {
+            self.increment();
+        }
     }
 
     fn match_exhausted(&self, rule: &'static str) -> NodeResult {
@@ -342,7 +343,7 @@ impl Parser {
         self.entering("phrase");
         let head = self.unary_high()?;
         let mut terms = vec![head];
-        let mut elements = self.multi_list(
+        let mut elements = self.comma_list(
             |t| matches!(t, patterns::phrase_terminator!()),
         )?;
         terms.append(&mut elements);
@@ -355,41 +356,33 @@ impl Parser {
         Ok(node)
     }
 
-    fn multi_list(&mut self, should_terminate: impl Fn(&Token) -> bool) -> Result<Vec<Node>, ErrorKind> {
-        self.entering("multi_list");
-        if matches!(self.current(), Newline) && matches!(self.next(), Indent) {
-            self.add_step("multi_list", format!("adding from sequence"));
-            let Node::Sequence { elements } = self.sequence()? else {
-                return Err(Unknown);
-            };
-            self.returning_list("multi_list", &elements);
-            return Ok(elements);
-        }
+    fn comma_list(&mut self, should_terminate: impl Fn(&Token) -> bool) -> Result<Vec<Node>, ErrorKind> {
+        self.entering("comma_list");
         let mut elements = Vec::new();
+        self.consume_any_whitespace("comma_list");
         let mut is_at_end = false;
         while !should_terminate(self.current()) && !is_at_end {
-            let element = self.annotation()?;
-            self.add_step("multi_list", format!("adding element '{element}'"));
+            let mut element = self.expression()?;
+            self.add_step("comma_list", format!("adding element '{element}'"));
+            if let Sym(":") = self.current() {
+                self.increment();
+                let value = self.expression()?;
+                element = Node::Assignment {
+                    target: Box::new(element),
+                    value: Box::new(value),
+                    operator: ":",
+                };
+            }
             elements.push(element);
-            if matches!(self.current(), Sym(",")) {
+            if let Sym(",") = self.current() {
                 self.increment();
             } else {
                 is_at_end = true;
             }
+            self.consume_any_whitespace("comma_list");
         }
-        self.returning_list("multi_list", &elements);
+        self.returning_list("comma_list", &elements);
         Ok(elements)
-    }
-
-    fn annotation(&mut self) -> NodeResult {
-        self.entering("annotation");
-        let mut node = self.unary_high()?;
-        if matches!(self.current(), Nomen(_)) {
-            let ty = self.path()?;
-            node = Node::Annotation { value: Box::new(node), ty: Box::new(ty) };
-        }
-        self.returning("annotation", &node);
-        Ok(node)
     }
 
     fn unary_high(&mut self) -> NodeResult {
@@ -428,14 +421,14 @@ impl Parser {
     fn array_dict(&mut self) -> NodeResult {
         self.entering("array_dict");
         consume!(self, Sym("["));
-        if let Sym("=") = self.current() {
+        if let Sym(":") = self.current() {
             self.increment();
             consume!(self, Sym("]"));
             let node = Node::Literal { value: Literal::Dict(HashMap::new()) };
             self.returning("array_dict", &node);
             return Ok(node);
         }
-        let elements = self.multi_list(
+        let elements = self.comma_list(
             |t| matches!(t, Sym("]"))
         )?;
         consume!(self, Sym("]"));
@@ -447,8 +440,8 @@ impl Parser {
             if n_dict_items == elements.len() {
                 let mut dict = HashMap::new();
                 for assn in elements {
-                    let Node::Assignment { target, value, operator: "=" } = assn else {
-                        return Err(IllegalLiteral { reason: "dict entries must be of form [key]=[value]", node: Some(assn) });
+                    let Node::Assignment { target, value, operator: ":" } = assn else {
+                        return Err(IllegalLiteral { reason: "dict entries must be of form [key]: [value]", node: Some(assn) });
                     };
                     let Node::Ident { name } = *target else {
                         return Err(IllegalLiteral { reason: "dict key must be an ident", node: Some(*target) });
@@ -462,7 +455,7 @@ impl Parser {
             } else if n_dict_items == 0 {
                 Literal::Array(elements)
             } else {
-                return Err(IllegalLiteral { reason: "illegal dict or array", node: None });
+                return Err(IllegalLiteral { reason: "illegal dict or array literal", node: None });
             };
         let node = Node::Literal { value };
         self.returning("array_dict", &node);

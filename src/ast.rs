@@ -22,11 +22,11 @@ impl Display for Literal {
                 fmt_list(f, elements, ", ", Some(('[', ']'))),
             Literal::Dict(dict) =>
                 if dict.is_empty() {
-                    write!(f, "[=]")
+                    write!(f, "[:]")
                 } else {
                     fmt_list(
                         f,
-                        &dict.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>(),
+                        &dict.iter().map(|(k, v)| format!("{k}: {v}")).collect::<Vec<_>>(),
                         ", ",
                         Some(('[', ']')),
                     )

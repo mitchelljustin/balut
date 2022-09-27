@@ -1,14 +1,3 @@
-ToString =
-  to_s = ()
-
-
-Person =
-  name String
-  id Int
-
-  ToString
-    to_s = "{name} id={id}"
-
-p = Person
-  name="Mitch"
-  id=1
+add
+  a: 1
+  b: 2
