@@ -2,6 +2,7 @@
 #![feature(decl_macro)]
 #![feature(half_open_range_patterns)]
 #![feature(let_else)]
+#![feature(generic_arg_infer)]
 
 use std::error::Error;
 use std::fs;

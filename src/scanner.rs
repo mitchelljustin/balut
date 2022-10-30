@@ -4,8 +4,8 @@ use std::num::ParseIntError;
 use std::str::FromStr;
 
 use crate::scanner::ErrorKind::{IllegalChar, IntParseFailed};
-use crate::token::{Location, ScannedToken, sym_allowed, Token};
 use crate::token::Token::*;
+use crate::token::{find_sym, Location, ScannedToken, Token};
 use crate::types::Int;
 
 #[derive(Debug, Clone)]
@@ -41,7 +41,7 @@ pub struct Scanner {
 }
 
 macro consume_all($self:expr, $pat:pat) {
-while !$self.is_at_end() && matches!($self.current(), $pat) {
+    while !$self.is_at_end() && matches!($self.current(), $pat) {
         $self.increment();
     }
 }
@@ -74,21 +74,14 @@ impl Scanner {
 
     fn scan_token(&mut self) -> Result<(), ErrorKind> {
         match self.advance() {
-            'a'..='z' | '_' =>
-                self.ident_like(Ident),
-            'A'..='Z' =>
-                self.ident_like(Nomen),
-            '0'..='9' =>
-                self.number()?,
-            '"' =>
-                self.string()?,
+            'a'..='z' | '_' => self.ident_like(Ident),
+            'A'..='Z' => self.ident_like(Nomen),
+            '0'..='9' => self.number()?,
+            '"' => self.string()?,
             ' ' => {}
-            '\n' =>
-                self.newline()?,
-            '#' =>
-                self.comment(),
-            first =>
-                self.sym(first)?
+            '\n' => self.newline()?,
+            '#' => self.comment(),
+            first => self.sym(first)?,
         }
         Ok(())
     }
@@ -102,21 +95,20 @@ impl Scanner {
     fn sym(&mut self, first: char) -> Result<(), ErrorKind> {
         let one_char = first.to_string();
         if self.is_at_end() {
-            let Some(sym) = sym_allowed(&one_char) else {
+            let Some(sym) = find_sym(&one_char) else {
                 return Err(IllegalChar(first));
             };
             self.add(Sym(sym));
             return Ok(());
         }
         let second = self.current();
-        let mut two_char = one_char.clone();
-        two_char.push(second);
-        if let Some(sym) = sym_allowed(&two_char) {
+        let two_char = format!("{first}{second}");
+        if let Some(sym) = find_sym(&two_char) {
             self.add(Sym(sym));
             self.increment();
             return Ok(());
         }
-        if let Some(sym) = sym_allowed(&one_char) {
+        if let Some(sym) = find_sym(&one_char) {
             self.add(Sym(sym));
             return Ok(());
         }
@@ -152,8 +144,10 @@ impl Scanner {
     fn scan(mut self) -> Result<Vec<ScannedToken>, ScannerError> {
         while !self.is_at_end() {
             self.start = self.index;
-            self.scan_token()
-                .map_err(|kind| ScannerError { kind, loc: self.loc.clone() })?;
+            self.scan_token().map_err(|kind| ScannerError {
+                kind,
+                loc: self.loc.clone(),
+            })?;
         }
         self.add(EOF);
         return Ok(self.tokens);
@@ -195,7 +189,7 @@ impl Scanner {
         self.tokens.push(ScannedToken { tok, loc });
     }
 
-    fn ident_like(&mut self, make_token: impl FnOnce(String) -> Token) {
+    fn ident_like(&mut self, make_token: fn(String) -> Token) {
         self.consume_all_alphanum();
         let name = self.lexeme();
 
@@ -206,4 +200,3 @@ impl Scanner {
         consume_all!(self, '0'..='9' | 'A'..='Z' | 'a'..='z' | '_');
     }
 }
-

@@ -1,5 +1,7 @@
-use std::fmt::{Display, Formatter};
 use crate::types::Int;
+use std::cell::LazyCell;
+use std::collections::HashSet;
+use std::fmt::{Display, Formatter};
 
 #[derive(Debug, Clone)]
 pub enum Token {
@@ -14,31 +16,13 @@ pub enum Token {
     EOF,
 }
 
-const ALLOWED_SYMS: &[&'static str] = &[
-    "::",
-    "=>",
-    ":",
-    ".",
-    "=",
-    "+",
-    "-",
-    "*",
-    "/",
-    "(",
-    ")",
-    "[",
-    "]",
-    "~",
-    "!",
-    "&",
-    ",",
+const SYMS: &[&'static str] = &[
+    "::", "=>", ":", ".", "=", "+", "-", "*", "/", "(", ")", "[", "]", "~", "!", "&", ",",
 ];
 
-pub fn sym_allowed(sym: &str) -> Option<&'static str> {
-    ALLOWED_SYMS
-        .iter()
-        .find(|&&s| s == sym)
-        .map(|s| *s)
+pub fn find_sym(sym: &str) -> Option<&'static str> {
+    let set: LazyCell<HashSet<&'static str>> = LazyCell::new(|| SYMS.iter().cloned().collect());
+    set.get(sym).cloned()
 }
 
 #[derive(Debug, Clone)]
@@ -49,10 +33,7 @@ pub struct Location {
 
 impl Default for Location {
     fn default() -> Self {
-        Location {
-            line: 1,
-            col: 0,
-        }
+        Location { line: 1, col: 0 }
     }
 }
 

@@ -3,7 +3,10 @@ use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 
 use crate::ast::{Literal, Node};
-use crate::interpreter::ErrorKind::{ArityError, FacetNotFound, MethodNotFound, ObjectNotFound, PropertyNotFound, TypeError, Unimplemented, Unknown, VariableNotFound};
+use crate::interpreter::ErrorKind::{
+    ArityError, FacetNotFound, MethodNotFound, ObjectNotFound, PropertyNotFound, TypeError,
+    Unimplemented, Unknown, VariableNotFound,
+};
 use crate::types::Int;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -24,7 +27,7 @@ impl Debug for MethodBody {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             MethodBody::Internal(_) => write!(f, "Internal"),
-            MethodBody::User(node) => write!(f, "User({node})")
+            MethodBody::User(node) => write!(f, "User({node})"),
         }
     }
 }
@@ -148,9 +151,19 @@ pub enum ErrorKind {
     FacetNotFound(String),
     PropertyNotFound(String),
     VariableNotFound(String),
-    MethodNotFound { name: String, target_id: ObjectId },
-    TypeError { expected: String, actual: String },
-    ArityError { method_name: String, expected: usize, actual: usize },
+    MethodNotFound {
+        name: String,
+        target_id: ObjectId,
+    },
+    TypeError {
+        expected: String,
+        actual: String,
+    },
+    ArityError {
+        method_name: String,
+        expected: usize,
+        actual: usize,
+    },
     Unimplemented(Node),
     Unknown,
 }
@@ -177,7 +190,6 @@ impl Scope {
     }
 }
 
-
 impl Display for ErrorKind {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
@@ -197,23 +209,34 @@ pub struct Interpreter {
 type ObjectResult = Result<ObjectId, ErrorKind>;
 type EmptyResult = Result<(), ErrorKind>;
 
-
 fn ident_list(idents: &[&str]) -> Vec<Node> {
     idents
         .into_iter()
-        .map(|name| Node::Ident { name: name.to_string() })
+        .map(|name| Node::Ident {
+            name: name.to_string(),
+        })
         .collect()
 }
 
-fn object_property_get(ctx: &mut Interpreter, this_id: ObjectId, args: &[ObjectId]) -> ObjectResult {
+fn object_property_get(
+    ctx: &mut Interpreter,
+    this_id: ObjectId,
+    args: &[ObjectId],
+) -> ObjectResult {
     let &[name_id] = args else { return Err(Unknown); };
     let this = ctx.get_object(this_id)?;
     let name_string = ctx.get_object(name_id)?.expect_string()?;
-    let value = this.get_property(name_id).ok_or_else(|| PropertyNotFound(name_string.clone()))?;
+    let value = this
+        .get_property(name_id)
+        .ok_or_else(|| PropertyNotFound(name_string.clone()))?;
     Ok(value)
 }
 
-fn object_property_set(ctx: &mut Interpreter, this_id: ObjectId, args: &[ObjectId]) -> ObjectResult {
+fn object_property_set(
+    ctx: &mut Interpreter,
+    this_id: ObjectId,
+    args: &[ObjectId],
+) -> ObjectResult {
     let &[name_id, value_id] = args else { return Err(Unknown); };
     ctx.get_object(name_id)?.expect_string()?;
     ctx.get_object(value_id)?;
@@ -227,7 +250,6 @@ fn object_facets(ctx: &mut Interpreter, this_id: ObjectId, args: &[ObjectId]) ->
     let facets = this.facets.clone();
     ctx.create_object_with_value(Value::Array(facets))
 }
-
 
 impl Interpreter {
     pub fn new() -> Self {
@@ -396,16 +418,14 @@ impl Interpreter {
     }
 
     fn string(&mut self, string: &str) -> ObjectResult {
-        Ok(
-            match self.strings.get(string) {
-                Some(&id) => id,
-                None => {
-                    let id = self.create_object_with_value(Value::String(string.to_string()))?;
-                    self.strings.insert(string.to_string(), id);
-                    id
-                }
+        Ok(match self.strings.get(string) {
+            Some(&id) => id,
+            None => {
+                let id = self.create_object_with_value(Value::String(string.to_string()))?;
+                self.strings.insert(string.to_string(), id);
+                id
             }
-        )
+        })
     }
 
     fn create_object_with_value(&mut self, value: Value) -> ObjectResult {
@@ -414,9 +434,15 @@ impl Interpreter {
         Ok(id)
     }
 
-    fn set_property(&mut self, target_id: ObjectId, key_string: &str, value_id: ObjectId) -> ObjectResult {
+    fn set_property(
+        &mut self,
+        target_id: ObjectId,
+        key_string: &str,
+        value_id: ObjectId,
+    ) -> ObjectResult {
         let key_id = self.string(&key_string)?;
-        self.get_object_mut(target_id)?.set_property(key_id, value_id);
+        self.get_object_mut(target_id)?
+            .set_property(key_id, value_id);
         Ok(value_id)
     }
 
@@ -424,11 +450,7 @@ impl Interpreter {
         let facet_id = self.create_object();
         self.facet_by_name.insert(facet_name.to_string(), facet_id);
         let name_string = self.string(&facet_name)?;
-        self.set_property(
-            facet_id,
-            "name",
-            name_string,
-        )?;
+        self.set_property(facet_id, "name", name_string)?;
         Ok(facet_id)
     }
 
@@ -438,7 +460,13 @@ impl Interpreter {
         Ok(facet_id)
     }
 
-    fn call_method(&mut self, target_id: ObjectId, receiver: Receiver, method_name_id: ObjectId, args: &[ObjectId]) -> ObjectResult {
+    fn call_method(
+        &mut self,
+        target_id: ObjectId,
+        receiver: Receiver,
+        method_name_id: ObjectId,
+        args: &[ObjectId],
+    ) -> ObjectResult {
         let target = self.get_object(target_id)?;
         let facets = target.facets.clone();
         for facet_id in facets.into_iter() {
@@ -480,13 +508,16 @@ impl Interpreter {
         Err(MethodNotFound { name, target_id })
     }
 
-
     fn get_object(&self, id: ObjectId) -> Result<&Object, ErrorKind> {
-        self.objects.get(id as usize).ok_or_else(|| ObjectNotFound(id))
+        self.objects
+            .get(id as usize)
+            .ok_or_else(|| ObjectNotFound(id))
     }
 
     fn get_object_mut(&mut self, id: ObjectId) -> Result<&mut Object, ErrorKind> {
-        self.objects.get_mut(id as usize).ok_or_else(|| ObjectNotFound(id))
+        self.objects
+            .get_mut(id as usize)
+            .ok_or_else(|| ObjectNotFound(id))
     }
 
     fn lookup_facet(&self, name: &str) -> ObjectResult {
